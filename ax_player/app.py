@@ -105,11 +105,14 @@ class AXPlayerWindow(QWidget):
         self._recursive = False
         # Bulk thumbnail work is capped and separate from everything else, so
         # a folder of thousands of files can't starve the UI thread pool.
-        # Each mpv frame-grab is GPU-decode-bound, not just CPU-bound, so more
-        # threads than roughly the core count just starts contending instead
-        # of helping -- scale with the machine instead of a flat guess.
+        # Each frame-grab is its own mpv.exe subprocess doing hardware decode
+        # -- GPU decode sessions are a hard-limited resource (and shared with
+        # both the main embedded mpv instance and thumbfast's own on-demand
+        # subprocess for hover previews), not just CPU cores, so this stays
+        # capped low rather than scaling up with core count: too many at once
+        # is exactly what produces "thumbfast: cannot create mpv subprocess".
         self._thumb_pool = QThreadPool(self)
-        self._thumb_pool.setMaxThreadCount(min(max(os.cpu_count() or 4, 2), 8))
+        self._thumb_pool.setMaxThreadCount(min(max(os.cpu_count() or 4, 2), 4))
         self._requested_thumbs: set[str] = set()
 
         self._jobs = _JobSignals()
