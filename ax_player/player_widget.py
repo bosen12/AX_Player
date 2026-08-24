@@ -8,6 +8,7 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
+from ax_player import debug_log
 from ax_player.paths import default_mpv_root, libmpv_dll, mpv_exe, ytdlp_exe
 
 _dll = libmpv_dll()
@@ -236,7 +237,19 @@ class PlayerWidget(QWidget):
         # Not part of the folder playlist -- yt-dlp (bundled in the mpv
         # config dir) resolves streams for anything mpv itself doesn't
         # already handle natively.
-        self._mpv_cmd("loadfile", url, "replace")
+        #
+        # Logged explicitly (not just via _mpv_cmd's broad except) because
+        # every failure report for this feature turned out impossible to
+        # diagnose blind -- the packaged exe has no console, and every
+        # source-checkout reproduction attempt played back fine, so the
+        # actual failure, whatever it is, has to be observed from a real
+        # run instead of guessed at again.
+        debug_log.log(f"play_url: url={url!r} config_dir={default_mpv_root()} ytdlp={ytdlp_exe()}")
+        try:
+            self._mpv.command("loadfile", url, "replace")
+            debug_log.log("play_url: loadfile command sent OK")
+        except Exception:
+            debug_log.log_exc("play_url: loadfile command FAILED")
 
     def remove_index(self, index: int) -> None:
         self._mpv_cmd("playlist-remove", str(index))

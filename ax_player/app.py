@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QEventLoop, QObject, QRect, QRunnable, QThread, QThreadPool, QUrl, Qt, Signal, Slot
@@ -11,7 +12,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QProgressDialog, QWidget
 
-from ax_player import resume
+from ax_player import debug_log, resume
 from ax_player.bridge import Bridge, to_url
 from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file, web_dir
 from ax_player.player_widget import PlayerWidget
@@ -319,6 +320,7 @@ class AXPlayerWindow(QWidget):
         # inside that hole -- invisible, even though its own JS logic works.
         # A native Qt dialog isn't subject to that at all.
         url, ok = QInputDialog.getText(self, "開啟網址", "輸入影片網址：")
+        debug_log.log(f"pick_url: ok={ok} raw={url!r}")
         if ok and url.strip():
             self.play_url(url.strip())
 
@@ -363,6 +365,7 @@ class AXPlayerWindow(QWidget):
 
     def play_url(self, url: str) -> None:
         url = url.strip()
+        debug_log.log(f"AXPlayerWindow.play_url: url={url!r}")
         if url:
             self.player.play_url(url)
 
@@ -500,6 +503,18 @@ def _bootstrap_mpv_if_needed() -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A windowed (console=False) build has nowhere for an uncaught exception
+    # to go -- Qt just prints to a stderr nobody can see and the app either
+    # limps on or vanishes. Route it to the same debug.log everything else
+    # in this diagnostic pass uses.
+    def _log_uncaught(exc_type, exc_value, exc_tb):
+        debug_log.log(
+            "UNCAUGHT: " + "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        )
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _log_uncaught
+
     argv = sys.argv if argv is None else argv
     app = QApplication(argv)
     app.setApplicationName("AX Player")
