@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <title>AX Player</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="titlebar" id="titlebar">
+        <div class="brand" aria-hidden="true">
+          <span class="bulb"></span>
+          <span class="wordmark">AX</span>
+        </div>
+        <div class="now-title" id="nowTitle"></div>
+        <div class="window-buttons">
+          <button class="winbtn" id="btnMin" aria-label="縮到最小">
+            <svg viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" /></svg>
+          </button>
+          <button class="winbtn" id="btnMax" aria-label="最大化">
+            <svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7" /></svg>
+          </button>
+          <button class="winbtn winbtn--close" id="btnClose" aria-label="關閉">
+            <svg viewBox="0 0 12 12"><line x1="3" y1="3" x2="9" y2="9" /><line x1="9" y1="3" x2="3" y2="9" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="body">
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar-actions">
+            <button class="btn btn--primary" id="btnOpenFolder">開啟資料夾</button>
+            <button class="btn" id="btnOpenFile">檔案</button>
+          </div>
+          <div class="folder-name" id="folderName">尚未開啟資料夾</div>
+          <ul class="playlist" id="playlist"></ul>
+          <div class="empty" id="emptyState">
+            <p>選一個資料夾開始播放。</p>
+            <p class="empty-hint">也可以直接把影片或資料夾拖進來。</p>
+            <p class="empty-hint">播放控制、進度預覽都在畫面上,由 mpv 自己處理。</p>
+          </div>
+        </aside>
+
+        <!-- Deliberately empty: mpv renders behind this, uosc draws its own
+             controls directly onto the video. This app doesn't reimplement
+             a player mpv already has tuned -- it only supplies the library. -->
+        <main class="stage" id="stage"></main>
+      </div>
+    </div>
+
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

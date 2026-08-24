@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <!-- 背景圓形（可選，深暖棕） -->
+  <circle cx="60" cy="60" r="56" fill="#14100C"/>
+
+  <!-- 膠捲外環 -->
+  <circle cx="60" cy="60" r="48" fill="none" stroke="#E0A458" stroke-width="5"/>
+
+  <!-- 膠捲齒孔（一圈，正圓 r=42，45 度平均分布） -->
+  <g fill="#E0A458">
+    <circle cx="60" cy="18" r="3.2"/>
+    <circle cx="89.7" cy="30.3" r="3.2"/>
+    <circle cx="102" cy="60" r="3.2"/>
+    <circle cx="89.7" cy="89.7" r="3.2"/>
+    <circle cx="60" cy="102" r="3.2"/>
+    <circle cx="30.3" cy="89.7" r="3.2"/>
+    <circle cx="18" cy="60" r="3.2"/>
+    <circle cx="30.3" cy="30.3" r="3.2"/>
+  </g>
+
+  <!-- 內圈細環 -->
+  <circle cx="60" cy="60" r="36" fill="none" stroke="#332A20" stroke-width="2.5"/>
+
+  <!-- 播放三角形（琥珀色） -->
+  <path d="M48 42 L48 78 L82 60 Z" fill="#E0A458"/>
+
+  <!-- 播放三角形內側高光（微亮） -->
+  <path d="M52 48 L52 72 L74 60 Z" fill="#ECE3D6" opacity="0.18"/>
+</svg>
