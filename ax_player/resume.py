@@ -31,7 +31,17 @@ def _load() -> dict[str, dict]:
 
 
 def get_progress(video: str) -> dict | None:
-    return _load().get(video)
+    entry = _load().get(video)
+    # Only ever written by save_progress() below, which always writes this
+    # shape -- but the file is user-editable JSON on disk, and at least one
+    # real install has been found with bare-number entries from some earlier
+    # write path. Treating those as "no data" rather than returning them
+    # raw matters because callers (the sidebar list build) do entry.get(...)
+    # unconditionally: one malformed entry used to raise mid-loop and
+    # silently truncate every row after it in the list.
+    if not isinstance(entry, dict) or "duration" not in entry:
+        return None
+    return entry
 
 
 def save_progress(video: str, pos: float, duration: float) -> None:
