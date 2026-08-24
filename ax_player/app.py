@@ -6,7 +6,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QEventLoop, QObject, QRect, QRunnable, QThread, QThreadPool, QUrl, Qt, Signal, Slot
-from PySide6.QtGui import QIcon, QRegion
+from PySide6.QtGui import QColor, QIcon, QRegion
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -102,6 +102,11 @@ class AXPlayerWindow(QWidget):
         super().__init__()
         self.setWindowTitle("AX Player")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        # The window's own default background is white, and QWebEngineView
+        # paints white until Chromium has loaded and applied the page's own
+        # dark CSS -- both show through for a frame or two on launch
+        # otherwise, as a white flash behind/around the mpv widget.
+        self.setStyleSheet("background-color: #171310;")
         self.setMinimumSize(860, 520)
         self.setMouseTracking(True)
         self.resize(1320, 780)
@@ -144,6 +149,10 @@ class AXPlayerWindow(QWidget):
         settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, False)
         self.web.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.web.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Same white-flash cause as above but inside Chromium itself: its
+        # default page background is white until index.html's CSS paints
+        # over it, which loses the race with the window becoming visible.
+        self.web.page().setBackgroundColor(QColor("#171310"))
 
         self.bridge = Bridge(self)
         channel = QWebChannel(self)
