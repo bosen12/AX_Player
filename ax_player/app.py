@@ -19,6 +19,14 @@ from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
 
 RESIZE_MARGIN = 6
 
+# Mirrors style.css's --sidebar-w / --titlebar-h. Used only to give the
+# player widget a correct initial geometry before the web page's own
+# ResizeObserver -> QWebChannel round trip has had a chance to report the
+# real stage rect (see the comment in AXPlayerWindow.__init__) -- the JS
+# side remains the source of truth for actual layout once it catches up.
+SIDEBAR_W = 312
+TITLEBAR_H = 40
+
 
 class _LoggingPage(QWebEnginePage):
     """Surfaces JS errors on stderr -- otherwise a broken handler fails silently."""
@@ -157,7 +165,20 @@ class AXPlayerWindow(QWidget):
         self.web.raise_()
         self.player.setFocus(Qt.FocusReason.OtherFocusReason)
 
-        self._stage_rect = QRect()
+        # Give the player widget a real geometry immediately, instead of
+        # leaving it at Qt's default QRect(0, 0, 100, 30) until the web
+        # page's own ResizeObserver -> QWebChannel round trip reports the
+        # real stage rect -- confirmed by direct testing to take several
+        # seconds after launch. Calling play_url() in that window (e.g. the
+        # user pastes a URL right after opening the app -- a completely
+        # normal thing to do) played back correctly but rendered into that
+        # tiny 100x30 corner, indistinguishable from nothing happening at
+        # all. reportStageGeometry() still corrects/confirms this once it
+        # fires; this only covers the gap before it does.
+        self._stage_rect = QRect(
+            SIDEBAR_W, TITLEBAR_H, max(1, self.width() - SIDEBAR_W), max(1, self.height() - TITLEBAR_H)
+        )
+        self._apply_stage_mask()
         self.setAcceptDrops(True)
 
     # -- layout --------------------------------------------------------
