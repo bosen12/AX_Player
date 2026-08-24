@@ -368,7 +368,17 @@ class AXPlayerWindow(QWidget):
             event.acceptProposedAction()
 
     def open_dropped(self, uris: list[str]) -> None:
-        paths = [Path(QUrl(u).toLocalFile()) for u in uris if u]
+        urls = [QUrl(u) for u in uris if u]
+        if not urls:
+            return
+        if not urls[0].isLocalFile():
+            # A dragged web link (e.g. from a browser) rather than a local
+            # file -- QUrl.toLocalFile() would silently return "" for this,
+            # which as a Path resolves to ".", so this has to be handled
+            # before falling into the local-file branch below at all.
+            self.play_url(urls[0].toString())
+            return
+        paths = [Path(u.toLocalFile()) for u in urls]
         paths = [p for p in paths if str(p)]
         if not paths:
             return
