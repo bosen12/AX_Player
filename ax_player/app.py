@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, QObject, QRect, QRunnable, QThread, QThreadPool, QUrl, Qt, Signal, Slot
+from PySide6.QtCore import QEventLoop, QObject, QRect, QRunnable, QThread, QThreadPool, QTimer, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QIcon, QRegion
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
@@ -255,7 +255,26 @@ class AXPlayerWindow(QWidget):
             if screen is not None:
                 geo = screen.geometry()
                 self.set_stage_geometry(0, 0, geo.width(), geo.height())
+            # That immediate attempt can still land *before* the top-level
+            # native window has actually finished resizing at the OS level
+            # (showFullScreen() only requests it -- the real native resize
+            # is asynchronous), in which case child widget geometry beyond
+            # the window's still-old bounds gets silently clipped rather
+            # than applied. Re-apply once more shortly after as a
+            # safety net, once the real resize has had a chance to land.
+            QTimer.singleShot(50, self._resync_fullscreen_stage)
         self.bridge.fullscreenChanged.emit(on)
+
+    def _resync_fullscreen_stage(self) -> None:
+        if not self.isFullScreen():
+            return
+        rect = self.rect()
+        # Bypasses set_stage_geometry()'s dedup guard deliberately: the
+        # target size is usually unchanged from the immediate attempt above,
+        # but *when* it's applied matters here (see _on_mpv_fullscreen) --
+        # skipping a no-op re-apply would defeat the whole point of the retry.
+        self._stage_rect = QRect(rect.x(), rect.y(), max(1, rect.width()), max(1, rect.height()))
+        self._apply_stage_mask()
 
     # -- library -----------------------------------------------------------
     def pick_folder(self) -> None:
