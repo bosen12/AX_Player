@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
 datas = [
     ("ax_player/resources", "ax_player/resources"),
@@ -58,12 +59,15 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="AXPlayer",
+# Both layouts are built from this one spec so the lists above can't drift
+# apart between them. Measured difference on this machine, click to window:
+# onedir ~2.0s, onefile ~3.6s -- onefile re-extracts the whole archive to
+# %TEMP% on every launch, which is what that extra time is. onedir is the
+# default; onefile stays available because a single portable file is worth
+# something when you just want to drop it somewhere.
+ONEFILE = os.environ.get("AXPLAYER_ONEFILE") == "1"
+
+common = dict(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -73,14 +77,26 @@ exe = EXE(
     icon="ax_player/resources/icon.ico",
 )
 
-# --onedir: no per-launch extraction to %TEMP% (that's what --onefile was
-# paying for on every single startup, not just the first).
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="AXPlayer",
-)
+if ONEFILE:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="AXPlayer",
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        **common,
+    )
+else:
+    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="AXPlayer", **common)
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="AXPlayer",
+    )
