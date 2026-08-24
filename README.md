@@ -42,15 +42,15 @@ run.bat "D:\Videos\某部動畫"
 run.bat "D:\Videos\某部動畫\第01話.mkv"
 ```
 
-## 打包成單一 EXE
+## 打包成 EXE
 
-想把 AX Player 包成一個 `AXPlayer.exe` 分發給別人（不需要對方裝 Python）：
+想把 AX Player 包成 `AXPlayer.exe` 分發給別人（不需要對方裝 Python）：
 
 ```bash
 build.bat
 ```
 
-會裝 `pyinstaller`，用 [`AXPlayer.spec`](AXPlayer.spec) 打包，完成後複製一份到專案根目錄的 `AXPlayer.exe`。
+會裝 `pyinstaller`，用 [`AXPlayer.spec`](AXPlayer.spec) 打包，完成後複製一份到專案根目錄的 `AXPlayer\` 資料夾（裡面是 `AXPlayer.exe` 加上它的依賴檔案）。是資料夾而不是單一檔案（`--onedir` 而非 `--onefile`）——這樣每次啟動不用先把整包解壓縮到 `%TEMP%`，開啟速度快很多；分發時把整個 `AXPlayer\` 資料夾一起帶著走即可，捷徑指到裡面的 `AXPlayer.exe`。
 
 打包進 exe 裡的東西：Python 執行環境、PySide6/QtWebEngine、`ax_player/web`、`ax_player/resources`，以及 `mpv-runtime/` 裡**小的**那些檔案（uosc、thumbfast、字型、`mpv.conf`/`input.conf`）。**`mpv.exe`/`libmpv-2.dll` 不會被打包進 exe**——太大、更新太頻繁。
 

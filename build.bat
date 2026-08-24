@@ -8,23 +8,23 @@ if errorlevel 1 (
   python -m PyInstaller --noconfirm --clean AXPlayer.spec
   if errorlevel 1 goto :failed
 )
-if not exist dist\AXPlayer.exe goto :failed
-copy /Y dist\AXPlayer.exe AXPlayer.exe >nul
-if errorlevel 1 (
+if not exist dist\AXPlayer\AXPlayer.exe goto :failed
+robocopy dist\AXPlayer AXPlayer /MIR /NFL /NDL /NJH /NJS
+if errorlevel 8 (
   echo.
-  echo Build succeeded but AXPlayer.exe is locked -- close the running app, then copy
-  echo dist\AXPlayer.exe over it manually.
+  echo Build succeeded but AXPlayer\AXPlayer.exe is locked -- close the running app,
+  echo then copy the dist\AXPlayer folder over it manually.
   endlocal
   exit /b 1
 )
 echo.
-echo Built: dist\AXPlayer.exe
+echo Built: dist\AXPlayer\AXPlayer.exe  (copied to AXPlayer\AXPlayer.exe)
 endlocal
 exit /b 0
 
 :failed
 echo.
-echo BUILD FAILED -- dist\AXPlayer.exe was not produced.
-echo If AX Player is running, close it first: PyInstaller cannot overwrite a locked exe.
+echo BUILD FAILED -- dist\AXPlayer\AXPlayer.exe was not produced.
+echo If AX Player is running, close it first: PyInstaller cannot overwrite locked files.
 endlocal
 exit /b 1
