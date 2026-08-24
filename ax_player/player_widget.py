@@ -154,7 +154,8 @@ class PlayerWidget(QWidget):
             # shared uosc.conf) only affects this embedded instance --
             # standalone mpv still gets its own top bar as configured.
             script_opts=script_opts,
-            log_handler=None,
+            log_handler=self._on_mpv_log,
+            loglevel="warn",
         )
         self._list_file: Path | None = None
 
@@ -170,6 +171,14 @@ class PlayerWidget(QWidget):
         self._progress_timer = QTimer(self)
         self._progress_timer.timeout.connect(self._emit_progress)
         self._progress_timer.start(self.PROGRESS_POLL_MS)
+
+    @staticmethod
+    def _on_mpv_log(loglevel: str, component: str, message: str) -> None:
+        # mpv's own warn/error log (ytdl_hook failures, network/demuxer
+        # errors, etc.) previously went nowhere in a console=False build --
+        # loadfile can report success (the command was merely queued) while
+        # the actual stream resolution or decode fails silently afterward.
+        debug_log.log(f"mpv[{loglevel}][{component}]: {message}")
 
     # -- property observers ------------------------------------------------
     def _on_path(self, _name, value) -> None:
