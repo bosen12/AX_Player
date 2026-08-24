@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -8,12 +9,13 @@ from PySide6.QtGui import QIcon, QRegion
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon, QWidget
 
+from ax_player import resume
 from ax_player.bridge import Bridge, to_url
 from ax_player.paths import icon_path, is_video_file, web_dir
 from ax_player.player_widget import PlayerWidget
-from ax_player.thumbnails import generate_thumbnail
+from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
 
 RESIZE_MARGIN = 6
 
@@ -41,6 +43,44 @@ class _ThumbJob(QRunnable):
         self._signals.thumb_done.emit(str(self._video), to_url(path) if path else "")
 
 
+class _PruneCacheJob(QRunnable):
+    @Slot()
+    def run(self) -> None:
+        prune_thumbnail_cache()
+
+
+class _ScanSignals(QObject):
+    done = Signal(str, list, str)  # folder path, [str video path], select path ("" for none)
+
+
+class _ScanJob(QRunnable):
+    """Directory scan + sort runs here instead of the UI thread -- a folder
+    with thousands of files (or a recursive scan) would otherwise freeze
+    dragging/clicking for as long as the scan takes.
+    """
+
+    def __init__(self, folder: Path, recursive: bool, select: Path | None, signals: _ScanSignals):
+        super().__init__()
+        self._folder = folder
+        self._recursive = recursive
+        self._select = select
+        self._signals = signals
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            entries = self._folder.rglob("*") if self._recursive else self._folder.iterdir()
+            playlist = sorted(
+                (p for p in entries if p.is_file() and is_video_file(p)),
+                key=lambda p: p.name.lower(),
+            )
+        except OSError:
+            playlist = []
+        self._signals.done.emit(
+            str(self._folder), [str(p) for p in playlist], str(self._select) if self._select else ""
+        )
+
+
 class AXPlayerWindow(QWidget):
     """Frameless shell: a web view draws the chrome + library sidebar, and
     mpv (with the user's own uosc/thumbfast scripts) owns everything about
@@ -62,14 +102,28 @@ class AXPlayerWindow(QWidget):
 
         self._folder: Path | None = None
         self._playlist: list[Path] = []
+        self._recursive = False
         # Bulk thumbnail work is capped and separate from everything else, so
         # a folder of thousands of files can't starve the UI thread pool.
+        # Each mpv frame-grab is GPU-decode-bound, not just CPU-bound, so more
+        # threads than roughly the core count just starts contending instead
+        # of helping -- scale with the machine instead of a flat guess.
         self._thumb_pool = QThreadPool(self)
-        self._thumb_pool.setMaxThreadCount(3)
+        self._thumb_pool.setMaxThreadCount(min(max(os.cpu_count() or 4, 2), 8))
         self._requested_thumbs: set[str] = set()
 
         self._jobs = _JobSignals()
         self._jobs.thumb_done.connect(self._on_thumb_done)
+
+        # Directory scans run one at a time; a second open_folder() while one
+        # is still scanning naturally queues behind it, and _on_folder_scanned
+        # discards stale results if a third supersedes both.
+        self._scan_pool = QThreadPool(self)
+        self._scan_pool.setMaxThreadCount(1)
+        self._scan_signals = _ScanSignals(self)
+        self._scan_signals.done.connect(self._on_folder_scanned)
+
+        self._thumb_pool.start(_PruneCacheJob())
 
         self.web = QWebEngineView(self)
         self.web.setPage(_LoggingPage(self.web))
@@ -94,12 +148,27 @@ class AXPlayerWindow(QWidget):
         self.player.path_changed.connect(self._on_path_changed)
         self.player.fullscreen_changed.connect(self._on_mpv_fullscreen)
         self.player.files_dropped.connect(self.open_dropped)
+        self.player.progress_changed.connect(self._on_progress)
+        self.player.fluid_active_changed.connect(self.bridge.fluidActiveChanged.emit)
         self.player.lower()
         self.web.raise_()
         self.player.setFocus(Qt.FocusReason.OtherFocusReason)
 
         self._stage_rect = QRect()
         self.setAcceptDrops(True)
+
+        self._quitting = False
+        self._tray: QSystemTrayIcon | None = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray = QSystemTrayIcon(self.windowIcon(), self)
+            self._tray.setToolTip("AX Player")
+            menu = QMenu()
+            menu.addAction("顯示 AX Player", self._restore_from_tray)
+            menu.addSeparator()
+            menu.addAction("結束", self._quit_from_tray)
+            self._tray.setContextMenu(menu)
+            self._tray.activated.connect(self._on_tray_activated)
+            self._tray.show()
 
     # -- layout --------------------------------------------------------
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -185,6 +254,20 @@ class AXPlayerWindow(QWidget):
             self.showNormal()
         self.bridge.fullscreenChanged.emit(on)
 
+    # -- system tray ---------------------------------------------------------
+    def _restore_from_tray(self) -> None:
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def _quit_from_tray(self) -> None:
+        self._quitting = True
+        self.close()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._restore_from_tray()
+
     # -- library -----------------------------------------------------------
     def pick_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "開啟資料夾")
@@ -198,16 +281,26 @@ class AXPlayerWindow(QWidget):
 
     def open_folder(self, folder: Path, select: Path | None = None) -> None:
         self._folder = folder
-        self._playlist = sorted(
-            (p for p in folder.iterdir() if p.is_file() and is_video_file(p)),
-            key=lambda p: p.name.lower(),
-        )
         self._requested_thumbs.clear()
-        items = [{"path": str(p), "name": p.name} for p in self._playlist]
+        self._scan_pool.start(_ScanJob(folder, self._recursive, select, self._scan_signals))
+
+    def _on_folder_scanned(self, folder_str: str, paths: list[str], select_str: str) -> None:
+        folder = Path(folder_str)
+        if folder != self._folder:
+            return  # a newer open_folder() call already superseded this scan
+        self._playlist = [Path(p) for p in paths]
+        items = [
+            {"path": str(p), "name": p.name, "progress": resume.get_progress(str(p))}
+            for p in self._playlist
+        ]
         self.bridge.folderOpened.emit(folder.name or str(folder), items)
+        select = Path(select_str) if select_str else None
         index = self._playlist.index(select) if select in self._playlist else 0
         self.player.load_playlist(self._playlist, index)
         self.player.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def set_recursive(self, on: bool) -> None:
+        self._recursive = on
 
     def request_thumbnail(self, video: Path) -> None:
         key = str(video)
@@ -221,11 +314,40 @@ class AXPlayerWindow(QWidget):
         if self._folder is None or video.parent != self._folder:
             self.open_folder(video.parent, select=video)
             return
-        self.player.play_index(self._playlist.index(video))
+        if video in self._playlist:
+            self.player.play_index(self._playlist.index(video))
         self.player.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def play_url(self, url: str) -> None:
+        url = url.strip()
+        if url:
+            self.player.play_url(url)
+
+    def remove_from_playlist(self, paths: list[str]) -> None:
+        remove_set = {Path(p) for p in paths}
+        if not remove_set or not self._playlist:
+            return
+        for index in sorted(
+            (i for i, p in enumerate(self._playlist) if p in remove_set), reverse=True
+        ):
+            self.player.remove_index(index)
+        self._playlist = [p for p in self._playlist if p not in remove_set]
+        items = [
+            {"path": str(p), "name": p.name, "progress": resume.get_progress(str(p))}
+            for p in self._playlist
+        ]
+        folder_name = self._folder.name or str(self._folder) if self._folder else ""
+        self.bridge.folderOpened.emit(folder_name, items)
+
+    def toggle_fluid_motion(self) -> None:
+        self.player.toggle_fluid_motion()
 
     def _on_path_changed(self, path: str) -> None:
         self.bridge.nowPlaying.emit(str(Path(path)))
+
+    def _on_progress(self, path: str, pos: float, duration: float) -> None:
+        resume.save_progress(path, pos, duration)
+        self.bridge.progressUpdated.emit(path, pos, duration)
 
     def _on_thumb_done(self, path: str, url: str) -> None:
         if url:
@@ -256,6 +378,10 @@ class AXPlayerWindow(QWidget):
             self.play(videos[0])
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._tray is not None and self._tray.isVisible() and not self._quitting:
+            event.ignore()
+            self.hide()
+            return
         self.player.shutdown()
         super().closeEvent(event)
 

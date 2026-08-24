@@ -13,6 +13,9 @@
           <span class="wordmark">AX</span>
         </div>
         <div class="now-title" id="nowTitle"></div>
+        <button class="winbtn winbtn--fluid" id="btnFluid" aria-label="切換 Fluid Motion 補幀" title="切換 Fluid Motion 補幀">
+          <svg viewBox="0 0 16 16"><path d="M1 8c1.5-4 2.5-4 4 0s2.5 4 4 0 2.5-4 4-4 2 2 2 4" /></svg>
+        </button>
         <div class="window-buttons">
           <button class="winbtn" id="btnMin" aria-label="縮到最小">
             <svg viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" /></svg>
@@ -31,13 +34,23 @@
           <div class="sidebar-actions">
             <button class="btn btn--primary" id="btnOpenFolder">開啟資料夾</button>
             <button class="btn" id="btnOpenFile">檔案</button>
+            <button class="btn" id="btnOpenUrl">網址</button>
           </div>
+          <label class="recursive-toggle">
+            <input type="checkbox" id="chkRecursive" />
+            <span>含子資料夾</span>
+          </label>
           <div class="folder-name" id="folderName">尚未開啟資料夾</div>
+          <input class="search-input" id="searchInput" type="search" placeholder="搜尋播放清單…" />
+          <div class="selection-bar is-hidden" id="selectionBar">
+            <span id="selectionCount"></span>
+            <button class="btn btn--danger" id="btnRemoveSelected">移除選取</button>
+          </div>
           <ul class="playlist" id="playlist"></ul>
           <div class="empty" id="emptyState">
             <p>選一個資料夾開始播放。</p>
             <p class="empty-hint">也可以直接把影片或資料夾拖進來。</p>
-            <p class="empty-hint">播放控制、進度預覽都在畫面上,由 mpv 自己處理。</p>
+            <p class="empty-hint">Ctrl+點擊可多選；播放控制、進度預覽都在畫面上,由 mpv 自己處理。</p>
           </div>
         </aside>
 

@@ -4,7 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
@@ -96,6 +96,10 @@ class PlayerWidget(QWidget):
     title_changed = Signal(str)
     fullscreen_changed = Signal(bool)
     files_dropped = Signal(list)  # list[str] of dropped file:// uris
+    progress_changed = Signal(str, float, float)  # path, pos, duration
+    fluid_active_changed = Signal(bool)
+
+    PROGRESS_POLL_MS = 5000
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -130,6 +134,15 @@ class PlayerWidget(QWidget):
         self._mpv.observe_property("path", self._on_path)
         self._mpv.observe_property("media-title", self._on_title)
         self._mpv.observe_property("fullscreen", self._on_fullscreen)
+        self._mpv.observe_property("vf", self._on_vf)
+
+        # mpv exposes time-pos/duration as properties that change continuously
+        # during playback; polling occasionally is far cheaper than observing
+        # and re-emitting on every frame, and the sidebar progress bar doesn't
+        # need better than ~5s resolution.
+        self._progress_timer = QTimer(self)
+        self._progress_timer.timeout.connect(self._emit_progress)
+        self._progress_timer.start(self.PROGRESS_POLL_MS)
 
     # -- property observers ------------------------------------------------
     def _on_path(self, _name, value) -> None:
@@ -143,6 +156,22 @@ class PlayerWidget(QWidget):
         # uosc's fullscreen button sets mpv's own property; mirror it onto the
         # host window, otherwise only the embedded surface would change.
         self.fullscreen_changed.emit(bool(value))
+
+    def _on_vf(self, _name, value) -> None:
+        # Mirrors zz-fluid-ipc.lua's own fluid_on() check, so the UI can show
+        # whether Fluid Motion's interpolation filter is currently applied.
+        vf = str(value or "")
+        self.fluid_active_changed.emit("@fluid" in vf or "fluid_rife" in vf)
+
+    def _emit_progress(self) -> None:
+        try:
+            path = self._mpv.path
+            pos = self._mpv.time_pos
+            duration = self._mpv.duration
+        except Exception:
+            return
+        if path and pos is not None and duration:
+            self.progress_changed.emit(str(path), float(pos), float(duration))
 
     def _mpv_cmd(self, *args: str) -> None:
         try:
@@ -176,6 +205,20 @@ class PlayerWidget(QWidget):
             self._mpv.command("playlist-play-index", str(index))
         except Exception:
             pass
+
+    def play_url(self, url: str) -> None:
+        # Not part of the folder playlist -- yt-dlp (bundled in the mpv
+        # config dir) resolves streams for anything mpv itself doesn't
+        # already handle natively.
+        self._mpv_cmd("loadfile", url, "replace")
+
+    def remove_index(self, index: int) -> None:
+        self._mpv_cmd("playlist-remove", str(index))
+
+    def toggle_fluid_motion(self) -> None:
+        # Reuses the F3 binding zz-fluid-ipc.lua already registers, instead
+        # of reimplementing its alive-check/IPC-notify dance here.
+        self._mpv_cmd("keypress", "F3")
 
     def set_fullscreen(self, on: bool) -> None:
         try:

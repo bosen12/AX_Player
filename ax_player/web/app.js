@@ -12,7 +12,9 @@ const state = {
   playing: null,
   rowsByPath: new Map(), // path -> <li>, rebuilt on every renderPlaylist
   thumbsByPath: new Map(), // path -> <img>, rebuilt on every renderPlaylist
+  progressBarsByPath: new Map(), // path -> <div class="thumb-progress-bar">
   activeRow: null,
+  selected: new Set(),
 };
 
 /* ── playlist ─────────────────────────────────────────────── */
@@ -31,38 +33,80 @@ const thumbObserver = new IntersectionObserver(
   { root: null, rootMargin: "300px 0px" }
 );
 
+function buildRow(item) {
+  const li = document.createElement("li");
+  li.className = "row";
+  li.dataset.path = item.path;
+
+  const thumb = document.createElement("div");
+  thumb.className = "thumb";
+
+  const img = document.createElement("img");
+  img.alt = "";
+  img.dataset.path = item.path;
+  thumb.appendChild(img);
+
+  const progress = document.createElement("div");
+  progress.className = "thumb-progress";
+  const bar = document.createElement("div");
+  bar.className = "thumb-progress-bar";
+  progress.appendChild(bar);
+  thumb.appendChild(progress);
+
+  const watched = document.createElement("div");
+  watched.className = "watched-badge";
+  watched.textContent = "✓";
+  thumb.appendChild(watched);
+
+  const name = document.createElement("div");
+  name.className = "row-name";
+  name.textContent = item.name;
+
+  li.append(thumb, name);
+
+  li.addEventListener("click", (event) => {
+    if (event.ctrlKey || event.metaKey) {
+      toggleSelection(item.path, li);
+    } else {
+      state.bridge.play(item.path);
+    }
+  });
+
+  if (item.progress) applyProgress(li, bar, item.progress);
+
+  return { li, img, bar };
+}
+
+function applyProgress(li, bar, progress) {
+  li.classList.toggle("is-watched", !!progress.watched);
+  const ratio = progress.duration > 0 ? progress.pos / progress.duration : 0;
+  bar.style.width = `${Math.min(100, Math.max(0, ratio * 100))}%`;
+}
+
 function renderPlaylist(items) {
   const list = $("playlist");
   list.innerHTML = "";
   state.rowsByPath = new Map();
   state.thumbsByPath = new Map();
+  state.progressBarsByPath = new Map();
   state.activeRow = null;
+  state.selected.clear();
+  updateSelectionBar();
   const hasItems = items.length > 0;
   list.classList.toggle("is-hidden", !hasItems);
   $("emptyState").classList.toggle("is-hidden", hasItems);
 
   const frag = document.createDocumentFragment();
   for (const item of items) {
-    const li = document.createElement("li");
-    li.className = "row";
-    li.dataset.path = item.path;
-    const img = document.createElement("img");
-    img.alt = "";
-    img.dataset.path = item.path;
-    const thumb = document.createElement("div");
-    thumb.className = "thumb";
-    thumb.appendChild(img);
-    const name = document.createElement("div");
-    name.className = "row-name";
-    name.textContent = item.name;
-    li.append(thumb, name);
-    li.addEventListener("click", () => state.bridge.play(item.path));
+    const { li, img, bar } = buildRow(item);
     frag.appendChild(li);
     state.rowsByPath.set(item.path, li);
     state.thumbsByPath.set(item.path, img);
+    state.progressBarsByPath.set(item.path, bar);
     thumbObserver.observe(img);
   }
   list.appendChild(frag);
+  applyFilter();
 }
 
 function setThumbnail(path, url) {
@@ -80,6 +124,43 @@ function markPlaying(path) {
   if (row) {
     row.classList.add("is-playing");
     row.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function updateProgress(path, pos, duration) {
+  const bar = state.progressBarsByPath.get(path);
+  const row = state.rowsByPath.get(path);
+  if (!bar || !row || !duration) return;
+  applyProgress(row, bar, { pos, duration, watched: pos / duration >= 0.95 });
+}
+
+/* ── selection (Ctrl+click) ──────────────────────────────────── */
+function toggleSelection(path, li) {
+  if (state.selected.has(path)) {
+    state.selected.delete(path);
+    li.classList.remove("is-selected");
+  } else {
+    state.selected.add(path);
+    li.classList.add("is-selected");
+  }
+  updateSelectionBar();
+}
+
+function updateSelectionBar() {
+  const bar = $("selectionBar");
+  const count = state.selected.size;
+  bar.classList.toggle("is-hidden", count === 0);
+  $("selectionCount").textContent = count > 0 ? `已選取 ${count} 項` : "";
+}
+
+/* ── search filter ────────────────────────────────────────── */
+function applyFilter() {
+  const q = $("searchInput").value.trim().toLowerCase();
+  for (const item of state.items) {
+    const row = state.rowsByPath.get(item.path);
+    if (!row) continue;
+    const match = !q || item.name.toLowerCase().includes(q);
+    row.classList.toggle("is-filtered-out", !match);
   }
 }
 
@@ -110,8 +191,21 @@ function setupChrome() {
   $("btnMin").addEventListener("click", () => state.bridge.minimizeWindow());
   $("btnMax").addEventListener("click", () => state.bridge.toggleMaximize());
   $("btnClose").addEventListener("click", () => state.bridge.closeWindow());
+  $("btnFluid").addEventListener("click", () => state.bridge.toggleFluidMotion());
   $("btnOpenFolder").addEventListener("click", () => state.bridge.openFolder());
   $("btnOpenFile").addEventListener("click", () => state.bridge.openFile());
+  $("btnOpenUrl").addEventListener("click", () => {
+    const url = window.prompt("輸入影片網址（支援 yt-dlp 能解析的網站）");
+    if (url && url.trim()) state.bridge.openUrl(url.trim());
+  });
+  $("chkRecursive").addEventListener("change", (event) => {
+    state.bridge.setRecursive(event.target.checked);
+  });
+  $("searchInput").addEventListener("input", applyFilter);
+  $("btnRemoveSelected").addEventListener("click", () => {
+    const paths = Array.from(state.selected);
+    if (paths.length) state.bridge.removeFromPlaylist(paths);
+  });
 }
 
 function setupDropTarget() {
@@ -152,6 +246,7 @@ function connectBridge(bridge) {
 
   bridge.folderOpened.connect((name, items) => {
     $("folderName").textContent = name || "尚未開啟資料夾";
+    $("searchInput").value = "";
     state.items = items;
     renderPlaylist(items);
     if (state.playing) markPlaying(state.playing);
@@ -159,7 +254,9 @@ function connectBridge(bridge) {
 
   bridge.thumbnailReady.connect(setThumbnail);
   bridge.nowPlaying.connect(markPlaying);
+  bridge.progressUpdated.connect(updateProgress);
   bridge.titleChanged.connect((title) => ($("nowTitle").textContent = title || ""));
+  bridge.fluidActiveChanged.connect((on) => $("btnFluid").classList.toggle("is-active", on));
 
   bridge.fullscreenChanged.connect((on) => {
     $("sidebar").classList.toggle("is-hidden", on);

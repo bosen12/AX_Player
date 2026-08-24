@@ -19,12 +19,14 @@ def to_url(path: Path | str) -> str:
 
 class Bridge(QObject):
     # Python -> JS
-    folderOpened = Signal(str, list)      # folder name, [{path, name}]
+    folderOpened = Signal(str, list)      # folder name, [{path, name, progress}]
     thumbnailReady = Signal(str, str)     # video path, image url
     nowPlaying = Signal(str)              # video path
     titleChanged = Signal(str)
     maximizedChanged = Signal(bool)
     fullscreenChanged = Signal(bool)
+    progressUpdated = Signal(str, float, float)  # video path, pos, duration
+    fluidActiveChanged = Signal(bool)
 
     def __init__(self, controller):
         super().__init__()
@@ -73,3 +75,19 @@ class Bridge(QObject):
         # The web view consumes drag events before the Qt widget sees them,
         # so drops are handled in the page and the URIs handed back here.
         self._c.open_dropped([str(u) for u in uris])
+
+    @Slot(str)
+    def openUrl(self, url: str) -> None:  # noqa: N802
+        self._c.play_url(url)
+
+    @Slot(bool)
+    def setRecursive(self, on: bool) -> None:  # noqa: N802
+        self._c.set_recursive(bool(on))
+
+    @Slot(list)
+    def removeFromPlaylist(self, paths: list) -> None:  # noqa: N802
+        self._c.remove_from_playlist([str(p) for p in paths])
+
+    @Slot()
+    def toggleFluidMotion(self) -> None:  # noqa: N802
+        self._c.toggle_fluid_motion()
