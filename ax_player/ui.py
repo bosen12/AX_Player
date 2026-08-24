@@ -27,10 +27,12 @@ from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QKeySequence,
     QPainter,
     QPainterPath,
     QPen,
     QPixmap,
+    QShortcut,
     QTextLayout,
     QTextOption,
 )
@@ -39,6 +41,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -50,6 +53,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ax_player import settings
 
 # Ported from the old style.css custom properties (which were in oklch).
 PAPER = "#171310"
@@ -426,6 +431,7 @@ class Sidebar(QWidget):
     open_file_clicked = Signal()
     open_url_clicked = Signal()
     recursive_changed = Signal(bool)
+    sort_changed = Signal(str)
     play_requested = Signal(str)
     remove_requested = Signal(list)
     thumb_requested = Signal(str)
@@ -462,10 +468,19 @@ class Sidebar(QWidget):
         actions.addWidget(btn_url)
         layout.addLayout(actions)
 
+        toggles = QHBoxLayout()
+        toggles.setContentsMargins(8, 0, 0, 0)
+        toggles.setSpacing(12)
         self._recursive = QCheckBox("含子資料夾", self)
         self._recursive.setObjectName("recursive")
         self._recursive.toggled.connect(self.recursive_changed)
-        layout.addWidget(self._recursive)
+        self._unwatched = QCheckBox("只看未看完", self)
+        self._unwatched.setObjectName("recursive")  # same compact styling
+        self._unwatched.toggled.connect(lambda _on: self._apply_filter())
+        toggles.addWidget(self._recursive)
+        toggles.addWidget(self._unwatched)
+        toggles.addStretch(1)
+        layout.addLayout(toggles)
 
         self._folder_name = QLabel("尚未開啟資料夾", self)
         self._folder_name.setObjectName("folderName")
@@ -477,6 +492,27 @@ class Sidebar(QWidget):
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._apply_filter)
         layout.addWidget(self._search)
+
+        sort_row = QHBoxLayout()
+        sort_row.setContentsMargins(8, 0, 0, 0)
+        sort_row.setSpacing(8)
+        sort_label = QLabel("排序", self)
+        sort_label.setObjectName("sortLabel")
+        self._sort = QComboBox(self)
+        self._sort.setObjectName("sort")
+        # Data is the persisted key; the label is what the user reads.
+        for key, text in (
+            (settings.SORT_NAME, "檔名"),
+            (settings.SORT_DATE, "修改日期（新到舊）"),
+            (settings.SORT_SIZE, "檔案大小（大到小）"),
+        ):
+            self._sort.addItem(text, key)
+        self._sort.currentIndexChanged.connect(
+            lambda _i: self.sort_changed.emit(str(self._sort.currentData()))
+        )
+        sort_row.addWidget(sort_label)
+        sort_row.addWidget(self._sort, 1)
+        layout.addLayout(sort_row)
 
         self._selection_bar = QWidget(self)
         selection_layout = QHBoxLayout(self._selection_bar)
@@ -501,9 +537,20 @@ class Sidebar(QWidget):
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setItemDelegate(_RowDelegate(self._list, self._queue_thumb))
         self._list.itemClicked.connect(self._on_item_clicked)
+        # Enter on the focused row. Unlike itemClicked this carries no
+        # modifier ambiguity, so it plays unconditionally.
+        self._list.itemActivated.connect(self._on_item_activated)
         self._list.itemSelectionChanged.connect(self._update_selection_bar)
         self._list.hide()
         layout.addWidget(self._list, 1)
+
+        delete_key = QShortcut(QKeySequence(Qt.Key.Key_Delete), self._list)
+        delete_key.setContext(Qt.ShortcutContext.WidgetShortcut)
+        delete_key.activated.connect(self._emit_remove)
+
+        find_key = QShortcut(QKeySequence.StandardKey.Find, self)
+        find_key.setContext(Qt.ShortcutContext.WindowShortcut)
+        find_key.activated.connect(self._focus_search)
 
         self._empty = QLabel(
             "選一個資料夾開始播放。\n\n"
@@ -515,6 +562,25 @@ class Sidebar(QWidget):
         self._empty.setWordWrap(True)
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._empty, 1)
+
+    def restore_state(self, *, recursive: bool, sort_mode: str, unwatched_only: bool) -> None:
+        """Apply persisted state without re-emitting the signals that would
+        immediately trigger a rescan of a folder that isn't open yet."""
+        for widget, value in ((self._recursive, recursive), (self._unwatched, unwatched_only)):
+            widget.blockSignals(True)
+            widget.setChecked(value)
+            widget.blockSignals(False)
+        index = self._sort.findData(sort_mode)
+        if index >= 0:
+            self._sort.blockSignals(True)
+            self._sort.setCurrentIndex(index)
+            self._sort.blockSignals(False)
+
+    def unwatched_only(self) -> bool:
+        return self._unwatched.isChecked()
+
+    def sort_mode(self) -> str:
+        return str(self._sort.currentData())
 
     # -- population ------------------------------------------------------
     def set_items(self, folder_name: str, items: list[dict]) -> None:
@@ -574,6 +640,15 @@ class Sidebar(QWidget):
         if path:
             self.play_requested.emit(str(path))
 
+    def _on_item_activated(self, item: QListWidgetItem) -> None:
+        path = item.data(PATH_ROLE)
+        if path:
+            self.play_requested.emit(str(path))
+
+    def _focus_search(self) -> None:
+        self._search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._search.selectAll()
+
     def _emit_remove(self) -> None:
         paths = [i.data(PATH_ROLE) for i in self._list.selectedItems()]
         if paths:
@@ -584,11 +659,15 @@ class Sidebar(QWidget):
         self._selection_bar.setVisible(count > 0)
         self._selection_count.setText(f"已選取 {count} 項" if count else "")
 
-    def _apply_filter(self, text: str) -> None:
-        needle = text.strip().lower()
+    def _apply_filter(self, _text: str | None = None) -> None:
+        needle = self._search.text().strip().lower()
+        unwatched_only = self._unwatched.isChecked()
         for index in range(self._list.count()):
             item = self._list.item(index)
-            item.setHidden(bool(needle) and needle not in item.text().lower())
+            hidden = bool(needle) and needle not in item.text().lower()
+            if unwatched_only and item.data(WATCHED_ROLE):
+                hidden = True
+            item.setHidden(hidden)
 
     def _queue_thumb(self, path: str) -> None:
         # Called from the delegate's paint; defer the actual request so
@@ -651,6 +730,28 @@ QLabel#folderName {{
     border-bottom: 1px solid {RULE};
 }}
 QLabel#selectionCount {{ color: {MUTED}; font-size: 11px; }}
+QLabel#sortLabel {{ color: {MUTED}; font-size: 11px; }}
+
+QComboBox#sort {{
+    padding: 4px 8px;
+    border: 1px solid {RULE};
+    border-radius: 6px;
+    background: {PAPER_3};
+    color: {INK};
+    font-size: 11px;
+}}
+QComboBox#sort:hover {{ border-color: {ACCENT}; }}
+/* Qt draws its own arrow here: the CSS border-triangle trick renders as a
+   stray dash rather than a triangle in Qt style sheets. */
+QComboBox#sort::drop-down {{ border: none; width: 18px; }}
+QComboBox#sort QAbstractItemView {{
+    background: {PAPER_3};
+    color: {INK};
+    border: 1px solid {RULE};
+    selection-background-color: {ACCENT};
+    selection-color: {ACCENT_INK};
+    outline: none;
+}}
 QLabel#empty {{ color: {MUTED}; font-size: 12px; padding: 0 8px; }}
 
 QLineEdit#search {{

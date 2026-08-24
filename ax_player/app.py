@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ax_player import debug_log, resume, ui
+from ax_player import debug_log, resume, settings, ui
 from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file
 from ax_player.player_widget import PlayerWidget
 from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
@@ -49,8 +49,25 @@ class _PruneCacheJob(QRunnable):
         prune_thumbnail_cache()
 
 
+def _sort_playlist(paths: list[Path], mode: str) -> list[Path]:
+    if mode == settings.SORT_NAME:
+        return sorted(paths, key=lambda p: p.name.lower())
+
+    def stat_key(path: Path) -> float:
+        try:
+            st = path.stat()
+        except OSError:
+            return 0.0
+        return st.st_mtime if mode == settings.SORT_DATE else float(st.st_size)
+
+    # Negated so date and size both read newest/largest first; name breaks ties
+    # so the order is stable across rescans of files sharing a timestamp.
+    return sorted(paths, key=lambda p: (-stat_key(p), p.name.lower()))
+
+
 class _ScanSignals(QObject):
-    done = Signal(str, list, str)  # folder path, [str video path], select path ("" for none)
+    # folder path, [str video path], select path ("" for none), reload player
+    done = Signal(str, list, str, bool)
 
 
 class _ScanJob(QRunnable):
@@ -59,25 +76,39 @@ class _ScanJob(QRunnable):
     dragging/clicking for as long as the scan takes.
     """
 
-    def __init__(self, folder: Path, recursive: bool, select: Path | None, signals: _ScanSignals):
+    def __init__(
+        self,
+        folder: Path,
+        recursive: bool,
+        select: Path | None,
+        signals: _ScanSignals,
+        sort_mode: str,
+        reload_player: bool,
+    ):
         super().__init__()
         self._folder = folder
         self._recursive = recursive
         self._select = select
         self._signals = signals
+        self._sort_mode = sort_mode
+        self._reload_player = reload_player
 
     @Slot()
     def run(self) -> None:
         try:
             entries = self._folder.rglob("*") if self._recursive else self._folder.iterdir()
-            playlist = sorted(
-                (p for p in entries if p.is_file() and is_video_file(p)),
-                key=lambda p: p.name.lower(),
+            # Sorting by date/size stats every file, so it belongs here on the
+            # worker thread with the scan, not on the UI thread afterwards.
+            playlist = _sort_playlist(
+                [p for p in entries if p.is_file() and is_video_file(p)], self._sort_mode
             )
         except OSError:
             playlist = []
         self._signals.done.emit(
-            str(self._folder), [str(p) for p in playlist], str(self._select) if self._select else ""
+            str(self._folder),
+            [str(p) for p in playlist],
+            str(self._select) if self._select else "",
+            self._reload_player,
         )
 
 
@@ -100,6 +131,8 @@ class AXPlayerWindow(QWidget):
         self.setMinimumSize(860, 520)
         self.setMouseTracking(True)
         self.resize(1320, 780)
+        # No-op on first run, when nothing has been saved yet.
+        self.restoreGeometry(settings.geometry())
         icon_file = icon_path()
         if icon_file.is_file():
             self.setWindowIcon(QIcon(str(icon_file)))
@@ -114,7 +147,9 @@ class AXPlayerWindow(QWidget):
 
         self._folder: Path | None = None
         self._playlist: list[Path] = []
-        self._recursive = False
+        self._current: Path | None = None
+        self._recursive = settings.recursive()
+        self._sort_mode = settings.sort_mode()
         # Bulk thumbnail work is capped and separate from everything else, so
         # a folder of thousands of files can't starve the UI thread pool.
         # Each frame-grab is its own mpv.exe subprocess doing hardware decode
@@ -152,6 +187,12 @@ class AXPlayerWindow(QWidget):
         self.sidebar.open_file_clicked.connect(self.pick_file)
         self.sidebar.open_url_clicked.connect(self.pick_url)
         self.sidebar.recursive_changed.connect(self.set_recursive)
+        self.sidebar.sort_changed.connect(self.set_sort_mode)
+        self.sidebar.restore_state(
+            recursive=self._recursive,
+            sort_mode=self._sort_mode,
+            unwatched_only=settings.unwatched_only(),
+        )
         self.sidebar.play_requested.connect(lambda p: self.play(Path(p)))
         self.sidebar.remove_requested.connect(self.remove_from_playlist)
         self.sidebar.thumb_requested.connect(lambda p: self.request_thumbnail(Path(p)))
@@ -274,17 +315,38 @@ class AXPlayerWindow(QWidget):
         if ok and url.strip():
             self.play_url(url.strip())
 
-    def open_folder(self, folder: Path, select: Path | None = None) -> None:
+    def open_folder(
+        self, folder: Path, select: Path | None = None, *, reload_player: bool = True
+    ) -> None:
         self._folder = folder
         self._requested_thumbs.clear()
-        self._scan_pool.start(_ScanJob(folder, self._recursive, select, self._scan_signals))
+        settings.set_last_folder(str(folder))
+        self._scan_pool.start(
+            _ScanJob(
+                folder,
+                self._recursive,
+                select,
+                self._scan_signals,
+                self._sort_mode,
+                reload_player,
+            )
+        )
 
-    def _on_folder_scanned(self, folder_str: str, paths: list[str], select_str: str) -> None:
+    def _on_folder_scanned(
+        self, folder_str: str, paths: list[str], select_str: str, reload_player: bool
+    ) -> None:
         folder = Path(folder_str)
         if folder != self._folder:
             return  # a newer open_folder() call already superseded this scan
         self._playlist = [Path(p) for p in paths]
         self.sidebar.set_items(folder.name or str(folder), self._playlist_items())
+        if not reload_player:
+            # A re-sort while something is playing: mpv's only way to take a
+            # new playlist is "loadlist ... replace", which restarts playback
+            # from the top. Reordering the sidebar is not worth interrupting
+            # the video for, so mpv keeps its order until the folder is
+            # reopened.
+            return
         select = Path(select_str) if select_str else None
         index = self._playlist.index(select) if select in self._playlist else 0
         self.player.load_playlist(self._playlist, index)
@@ -298,6 +360,20 @@ class AXPlayerWindow(QWidget):
 
     def set_recursive(self, on: bool) -> None:
         self._recursive = on
+        settings.set_recursive(on)
+
+    def set_sort_mode(self, mode: str) -> None:
+        if mode == self._sort_mode:
+            return
+        self._sort_mode = mode
+        settings.set_sort_mode(mode)
+        if self._folder is not None:
+            # Re-sorting must not restart whatever is playing (see
+            # _on_folder_scanned), so the player's playlist is left alone
+            # while a file is loaded.
+            self.open_folder(
+                self._folder, select=self._current, reload_player=self._current is None
+            )
 
     def request_thumbnail(self, video: Path) -> None:
         key = str(video)
@@ -337,7 +413,8 @@ class AXPlayerWindow(QWidget):
         self.player.toggle_fluid_motion()
 
     def _on_path_changed(self, path: str) -> None:
-        self.sidebar.set_playing(str(Path(path)))
+        self._current = Path(path)
+        self.sidebar.set_playing(str(self._current))
 
     def _on_progress(self, path: str, pos: float, duration: float) -> None:
         resume.save_progress(path, pos, duration)
@@ -400,6 +477,10 @@ class AXPlayerWindow(QWidget):
             self.play(videos[0])
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # Saved before hiding, while the window still reports a real geometry.
+        settings.set_geometry(self.saveGeometry())
+        settings.set_unwatched_only(self.sidebar.unwatched_only())
+        settings.flush()
         # Tearing mpv down takes ~0.5s here (releasing the GPU context and
         # writing mpv's watch-later position), and Qt only hides the window
         # *after* closeEvent returns -- so the window sat on screen, frozen,
@@ -498,6 +579,13 @@ def main(argv: list[str] | None = None) -> int:
             window.play(target)
         elif target.is_dir():
             window.open_folder(target)
+    else:
+        # Reopen whatever library was last in use, so a normal launch lands
+        # on the file list rather than an empty sidebar. Skipped when a file
+        # or folder was passed in -- that is a more specific request.
+        last = settings.last_folder()
+        if last and Path(last).is_dir():
+            window.open_folder(Path(last))
 
     return app.exec()
 
