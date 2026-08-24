@@ -21,7 +21,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from ax_player.cache import cache_key, prune_cache
 from ax_player.paths import contact_sheet_cache_dir, mpv_exe
 
-GRID_COLS = 4
+GRID_COLS = 3
 GRID_ROWS = 3
 FRAME_COUNT = GRID_COLS * GRID_ROWS
 CELL_WIDTH = 220
