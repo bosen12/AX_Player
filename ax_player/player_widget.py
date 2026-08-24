@@ -127,6 +127,16 @@ class PlayerWidget(QWidget):
             # theme. force_window makes mpv paint background_color immediately.
             force_window="immediate",
             background_color="#171310",
+            # uosc's own top_bar=no-border draws its own minimize/maximize/
+            # close buttons on the video whenever mpv has no native window
+            # border -- which mpv.conf's border=no always means. AX Player
+            # already supplies real window controls in its own titlebar, and
+            # uosc's close button issues mpv's own `quit`, which for an
+            # embedded (wid) instance shuts mpv's core down without the Qt
+            # shell knowing, hanging the app. Overriding it here (not in the
+            # shared uosc.conf) only affects this embedded instance --
+            # standalone mpv still gets its own top bar as configured.
+            script_opts="uosc-top_bar=never",
             log_handler=None,
         )
         self._list_file: Path | None = None
