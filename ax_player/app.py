@@ -400,6 +400,13 @@ class AXPlayerWindow(QWidget):
             self.play(videos[0])
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # Tearing mpv down takes ~0.5s here (releasing the GPU context and
+        # writing mpv's watch-later position), and Qt only hides the window
+        # *after* closeEvent returns -- so the window sat on screen, frozen,
+        # for that entire time. Hide it first and force the repaint through,
+        # so the teardown happens behind a window that is already gone.
+        self.hide()
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         self.player.shutdown()
         super().closeEvent(event)
 
