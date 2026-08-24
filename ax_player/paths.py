@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,15 +14,47 @@ def is_video_file(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTENSIONS
 
 
+def _frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+@lru_cache(maxsize=1)
+def _package_dir() -> Path:
+    """ax_player/ itself -- where web/ and resources/ live. PyInstaller's
+    `datas` keeps this relative layout intact under the extraction root."""
+    if _frozen():
+        return Path(sys._MEIPASS) / "ax_player"  # type: ignore[attr-defined]
+    return Path(__file__).parent
+
+
+@lru_cache(maxsize=1)
+def _project_root() -> Path:
+    """Project root -- where mpv-runtime/ sits alongside ax_player/ in a
+    source checkout, and the same relative layout under PyInstaller's
+    extraction root for the small bundled mpv-runtime config/scripts."""
+    if _frozen():
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return Path(__file__).parent.parent
+
+
 @lru_cache(maxsize=1)
 def bundled_mpv_root() -> Path:
     """The slim mpv runtime shipped alongside AX Player itself.
 
-    The scripts/fonts/configs in here are checked into the repo directly
-    (small, stable text/lua files); mpv.exe and libmpv-2.dll are not --
-    run setup_mpv.py to fetch the official build into this folder.
+    In a source checkout this is mpv-runtime/ next to run.bat: the
+    scripts/fonts/configs are checked into the repo directly (small,
+    stable text/lua files), and mpv.exe/libmpv-2.dll are fetched into it
+    by setup_mpv.py.
+
+    In the packaged exe, mpv.exe/libmpv-2.dll are deliberately NOT
+    embedded (large, change often) -- this instead points at a writable
+    per-user folder that AXPlayerWindow's frozen-mode bootstrap populates
+    on first launch (seeding the small bundled config/scripts, then
+    fetching the two binaries the same way setup_mpv.py does).
     """
-    return Path(__file__).parent.parent / "mpv-runtime"
+    if _frozen():
+        return app_data_dir() / "mpv-runtime"
+    return _project_root() / "mpv-runtime"
 
 
 @lru_cache(maxsize=1)
@@ -80,8 +113,8 @@ def resume_db_path() -> Path:
 
 @lru_cache(maxsize=1)
 def icon_path() -> Path:
-    return Path(__file__).parent / "resources" / "icon.ico"
+    return _package_dir() / "resources" / "icon.ico"
 
 
 def web_dir() -> Path:
-    return Path(__file__).parent / "web"
+    return _package_dir() / "web"

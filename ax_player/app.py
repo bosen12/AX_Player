@@ -4,12 +4,20 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRect, QRunnable, Qt, QThreadPool, QUrl, Signal, Slot
+from PySide6.QtCore import QEventLoop, QObject, QRect, QRunnable, QThread, QThreadPool, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QIcon, QRegion
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QMenu,
+    QMessageBox,
+    QProgressDialog,
+    QSystemTrayIcon,
+    QWidget,
+)
 
 from ax_player import resume
 from ax_player.bridge import Bridge, to_url
@@ -389,6 +397,60 @@ class AXPlayerWindow(QWidget):
         super().closeEvent(event)
 
 
+class _MpvFetchWorker(QThread):
+    status = Signal(str)
+    failed = Signal(str)
+
+    def run(self) -> None:  # noqa: N802
+        from ax_player.mpv_fetch import ensure_runtime
+
+        try:
+            ensure_runtime(on_progress=self.status.emit)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            self.failed.emit(str(exc))
+
+
+def _bootstrap_mpv_if_needed() -> bool:
+    """Packaged-exe first run only: fetches mpv into a per-user folder if
+    nothing usable is found anywhere (see paths.bundled_mpv_root). No-ops
+    instantly on every subsequent launch, and always in a source checkout
+    where run.bat already called setup_mpv.py before Python even started.
+
+    Returns False (caller should abort startup) only if the fetch failed.
+    """
+    from ax_player.paths import default_mpv_root
+
+    if not getattr(sys, "frozen", False) or (default_mpv_root() / "libmpv-2.dll").is_file():
+        return True
+
+    progress = QProgressDialog("正在準備播放引擎（僅限第一次啟動）…", "", 0, 0)
+    progress.setWindowTitle("AX Player")
+    progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+    progress.setCancelButton(None)
+    progress.setMinimumDuration(0)
+    progress.show()
+
+    worker = _MpvFetchWorker()
+    worker.status.connect(progress.setLabelText)
+    error: list[str] = []
+    worker.failed.connect(error.append)
+
+    loop = QEventLoop()
+    worker.finished.connect(loop.quit)
+    worker.start()
+    loop.exec()
+    progress.close()
+
+    if error:
+        QMessageBox.critical(
+            None,
+            "AX Player",
+            f"播放引擎下載失敗：\n{error[0]}\n\n請檢查網路連線後重新啟動 AX Player。",
+        )
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
     app = QApplication(argv)
@@ -396,6 +458,9 @@ def main(argv: list[str] | None = None) -> int:
     icon_file = icon_path()
     if icon_file.is_file():
         app.setWindowIcon(QIcon(str(icon_file)))
+
+    if not _bootstrap_mpv_if_needed():
+        return 1
 
     window = AXPlayerWindow()
     window.show()

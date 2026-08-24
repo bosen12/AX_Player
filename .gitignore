@@ -7,3 +7,8 @@ __pycache__/
 # fonts, configs) is small and checked in directly.
 /mpv-runtime/mpv.exe
 /mpv-runtime/libmpv-2.dll
+
+# PyInstaller build output -- build.bat regenerates this; not committed.
+/build/
+/dist/
+/AXPlayer.exe

@@ -43,6 +43,22 @@ run.bat "D:\Videos\某部動畫"
 run.bat "D:\Videos\某部動畫\第01話.mkv"
 ```
 
+## 打包成單一 EXE
+
+想把 AX Player 包成一個 `AXPlayer.exe` 分發給別人（不需要對方裝 Python）：
+
+```bash
+build.bat
+```
+
+會裝 `pyinstaller`，用 [`AXPlayer.spec`](AXPlayer.spec) 打包，完成後複製一份到專案根目錄的 `AXPlayer.exe`。
+
+打包進 exe 裡的東西：Python 執行環境、PySide6/QtWebEngine、`ax_player/web`、`ax_player/resources`，以及 `mpv-runtime/` 裡**小的**那些檔案（uosc、thumbfast、字型、`mpv.conf`/`input.conf`）。**`mpv.exe`/`libmpv-2.dll` 不會被打包進 exe**——太大、更新太頻繁。
+
+打包好的 `AXPlayer.exe` 第一次啟動時，如果偵測不到任何可用的 mpv（`C:\mpv`、`%ProgramFiles%\mpv` 都沒有），會自動彈出一個小視窗顯示「正在準備播放引擎」，背景下載官方 mpv 建置到 `%LOCALAPPDATA%\AXPlayer\mpv-runtime\`，下載一次之後所有後續啟動都是瞬間開啟。整個過程不需要使用者自己跑 `setup_mpv.py` 或碰任何指令——這就是單一 exe 分發的意義：對方只要有網路，雙擊執行檔就好。
+
+如果目標機器裝有一套完整的個人化 mpv 環境（`C:\mpv`），打包版一樣會優先偵測並直接使用，不會另外下載。
+
 ## mpv 從哪裡來
 
 AX Player 不會重新發明播放器核心，而是「嵌入」一份真正的 mpv。找 mpv 的順序（見 [`ax_player/paths.py`](ax_player/paths.py) 的 `default_mpv_root()`）：
@@ -86,8 +102,12 @@ py -3.10 setup_mpv.py
 ```
 AX_Player/
 ├── run.bat                  # 一鍵啟動（含 pip install / mpv 自動抓取）
-├── setup_mpv.py             # 抓官方 mpv 建置進 mpv-runtime/
+├── build.bat                # 打包成 AXPlayer.exe（PyInstaller）
+├── AXPlayer.spec             # PyInstaller 打包設定
+├── setup_mpv.py             # CLI：抓官方 mpv 建置進 mpv-runtime/
 ├── requirements.txt
+├── packaging/
+│   └── launch.py             # 打包用的進入點
 ├── mpv-runtime/              # 隨附的精簡 mpv 環境（見上方「mpv 從哪裡來」）
 │   ├── mpv.exe               # gitignored，由 setup_mpv.py 產生
 │   ├── libmpv-2.dll          # gitignored，由 setup_mpv.py 產生
@@ -97,11 +117,14 @@ AX_Player/
 │   ├── fonts/
 │   └── NOTICE.md             # 授權與來源清單
 └── ax_player/
-    ├── app.py                 # 主視窗、系統匣、資料夾掃描、播放清單
+    ├── app.py                 # 主視窗、系統匣、資料夾掃描、播放清單、
+    │                           #   打包版首次啟動的 mpv 下載流程
     ├── bridge.py               # QWebChannel：HTML 介面 <-> Python
     ├── player_widget.py         # 嵌入 mpv 的核心：wid 嵌入、滑鼠/鍵盤事件轉發、
     │                             #   Fluid Motion 整合、進度輪詢
-    ├── paths.py                 # mpv 路徑解析、快取目錄
+    ├── paths.py                 # mpv 路徑解析、快取目錄、打包/原始碼路徑判斷
+    ├── mpv_fetch.py              # 下載官方 mpv 建置的實際邏輯（setup_mpv.py 跟
+    │                             #   打包版首次啟動流程共用）
     ├── thumbnails.py            # 縮圖產生 + 快取淘汰
     ├── resume.py                 # 播放進度的小型 JSON 儲存
     ├── resources/                # 應用程式圖示
