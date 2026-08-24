@@ -197,6 +197,7 @@ class AXPlayerWindow(QWidget):
         self._thumb_pool = QThreadPool(self)
         self._thumb_pool.setMaxThreadCount(min(max(os.cpu_count() or 4, 2), 4))
         self._requested_thumbs: set[str] = set()
+        self._requested_sheets: set[str] = set()
 
         self._jobs = _JobSignals()
         self._jobs.thumb_done.connect(self._on_thumb_done)
@@ -391,6 +392,7 @@ class AXPlayerWindow(QWidget):
             return  # a newer open_folder() call already superseded this scan
         self._playlist = [Path(p) for p in paths]
         self.sidebar.set_items(folder.name or str(folder), self._playlist_items())
+        self._queue_all_contact_sheets()
         if not reload_player:
             # A re-sort while something is playing: mpv's only way to take a
             # new playlist is "loadlist ... replace", which restarts playback
@@ -498,16 +500,31 @@ class AXPlayerWindow(QWidget):
         if image_path:
             self.sidebar.set_thumbnail(path, ui.thumbnail_pixmap(image_path))
 
-    def request_contact_sheet(self, path: str) -> None:
+    def request_contact_sheet(self, path: str, *, priority: int = 0) -> None:
         video = Path(path)
         cached = contact_sheets.cached_sheet_path(video)
         if cached.is_file() and cached.stat().st_size > 0:
-            # Already on disk (a repeat hover, or generated in an earlier
-            # session): load and hand it back directly rather than paying a
-            # thread hop for a case that should feel instant.
+            # Already on disk (a repeat hover, an eager pre-generation from
+            # _on_folder_scanned, or generated in an earlier session): load
+            # and hand it back directly rather than paying a thread hop for
+            # a case that should feel instant.
             self.sidebar.show_contact_sheet(path, ui.thumbnail_pixmap(cached))
             return
-        self._thumb_pool.start(_SheetJob(video, self._sheet_signals))
+        if path in self._requested_sheets:
+            return  # already queued -- eager pre-generation and a hover can race
+        self._requested_sheets.add(path)
+        self._thumb_pool.start(_SheetJob(video, self._sheet_signals), priority)
+
+    def _queue_all_contact_sheets(self) -> None:
+        # Pre-generate every row's contact sheet up front instead of waiting
+        # for a hover -- request_contact_sheet's cache-hit and in-flight
+        # checks make this a no-op for anything already done or queued, and
+        # jobs beyond _thumb_pool's cap just sit in the pool's own queue
+        # rather than spawning unbounded mpv subprocesses at once. Queued
+        # below the default priority so a live hover or a thumbnail paint
+        # request still jumps the line ahead of this background sweep.
+        for video in self._playlist:
+            self.request_contact_sheet(str(video), priority=-1)
 
     def _on_sheet_done(self, path: str, image_path: str) -> None:
         pixmap = ui.thumbnail_pixmap(image_path) if image_path else QPixmap()
