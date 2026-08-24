@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressD
 
 from ax_player import resume
 from ax_player.bridge import Bridge, to_url
-from ax_player.paths import icon_path, is_video_file, web_dir
+from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file, web_dir
 from ax_player.player_widget import PlayerWidget
 from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
 
@@ -283,7 +283,10 @@ class AXPlayerWindow(QWidget):
             self.open_folder(Path(path))
 
     def pick_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "開啟影片")
+        exts = " ".join(f"*{ext}" for ext in sorted(VIDEO_EXTENSIONS))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "開啟影片", filter=f"影片檔案 ({exts});;所有檔案 (*)"
+        )
         if path:
             self.play(Path(path))
 

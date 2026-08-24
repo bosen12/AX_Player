@@ -22,15 +22,16 @@ from ax_player.paths import bundled_mpv_root  # noqa: E402
 
 def main() -> int:
     target = bundled_mpv_root()
-    if (target / "mpv.exe").is_file() and (target / "libmpv-2.dll").is_file():
-        print(f"{target} already has mpv.exe and libmpv-2.dll -- nothing to do.")
+    files = ["mpv.exe", "libmpv-2.dll", "yt-dlp.exe"]
+    if all((target / name).is_file() for name in files):
+        print(f"{target} already has everything -- nothing to do.")
         return 0
     try:
         fetch_binaries(target, on_progress=print)
     except Exception as exc:
         print(f"failed: {exc}", file=sys.stderr)
         return 1
-    print(f"Done:\n  {target / 'mpv.exe'}\n  {target / 'libmpv-2.dll'}")
+    print("Done:\n  " + "\n  ".join(str(target / name) for name in files))
     return 0
 
 

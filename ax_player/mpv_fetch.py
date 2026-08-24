@@ -21,6 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 RSS_URL = "https://sourceforge.net/projects/mpv-player-windows/rss?path=/"
+YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
@@ -56,9 +57,10 @@ def _extract_member(archive: Path, member: str, dest_dir: Path) -> None:
 
 
 def fetch_binaries(runtime_dir: Path, on_progress: Callable[[str], None] | None = None) -> None:
-    """Download mpv.exe + libmpv-2.dll into runtime_dir. No-ops if both
-    already exist there. Raises on failure -- callers decide how to
-    surface that (CLI prints it, the packaged app shows a dialog).
+    """Download mpv.exe + libmpv-2.dll + yt-dlp.exe into runtime_dir. Each
+    is skipped individually if already present. Raises on failure --
+    callers decide how to surface that (CLI prints it, the packaged app
+    shows a dialog).
 
     Requires nothing beyond Windows' own bundled `tar.exe` (actually
     bsdtar, ships with Windows 10 1803+ and Windows 11) to extract the 7z
@@ -71,19 +73,25 @@ def fetch_binaries(runtime_dir: Path, on_progress: Callable[[str], None] | None 
     runtime_dir.mkdir(parents=True, exist_ok=True)
     mpv_exe = runtime_dir / "mpv.exe"
     libmpv = runtime_dir / "libmpv-2.dll"
-    if mpv_exe.is_file() and libmpv.is_file():
-        return
+    ytdlp = runtime_dir / "yt-dlp.exe"
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
+    if not (mpv_exe.is_file() and libmpv.is_file()):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
 
-        player_archive = tmp_dir / "mpv-player.7z"
-        _download(_latest_download_url("/64bit/mpv-x86_64-"), player_archive, on_progress)
-        _extract_member(player_archive, "mpv.exe", runtime_dir)
+            player_archive = tmp_dir / "mpv-player.7z"
+            _download(_latest_download_url("/64bit/mpv-x86_64-"), player_archive, on_progress)
+            _extract_member(player_archive, "mpv.exe", runtime_dir)
 
-        libmpv_archive = tmp_dir / "mpv-libmpv.7z"
-        _download(_latest_download_url("/libmpv/mpv-dev-x86_64-"), libmpv_archive, on_progress)
-        _extract_member(libmpv_archive, "libmpv-2.dll", runtime_dir)
+            libmpv_archive = tmp_dir / "mpv-libmpv.7z"
+            _download(_latest_download_url("/libmpv/mpv-dev-x86_64-"), libmpv_archive, on_progress)
+            _extract_member(libmpv_archive, "libmpv-2.dll", runtime_dir)
+
+    if not ytdlp.is_file():
+        # mpv's built-in ytdl_hook shells out to a yt-dlp binary -- it isn't
+        # embedded in mpv itself. Without this, "open URL" silently can't
+        # resolve anything from YouTube/Twitch/etc, only direct media links.
+        _download(YTDLP_URL, ytdlp, on_progress)
 
 
 def ensure_runtime(on_progress: Callable[[str], None] | None = None) -> None:

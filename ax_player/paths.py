@@ -94,6 +94,11 @@ def mpv_exe() -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def ytdlp_exe() -> Path | None:
+    candidate = default_mpv_root() / "yt-dlp.exe"
+    return candidate if candidate.is_file() else None
+
+
 def app_data_dir() -> Path:
     base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     path = base / "AXPlayer"

@@ -8,7 +8,7 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
-from ax_player.paths import default_mpv_root, libmpv_dll, mpv_exe
+from ax_player.paths import default_mpv_root, libmpv_dll, mpv_exe, ytdlp_exe
 
 _dll = libmpv_dll()
 if _dll is not None:
@@ -122,6 +122,13 @@ class PlayerWidget(QWidget):
             # its auto-detection depends on a frontend setting
             # user-data/frontend/process-path, which python-mpv doesn't.
             script_opts += f",thumbfast-mpv_path={exe}"
+        ytdlp = ytdlp_exe()
+        if ytdlp is not None:
+            # mpv's built-in ytdl_hook shells out to a yt-dlp binary rather
+            # than embedding one -- without this it defaults to bare "yt-dlp"
+            # on PATH, which isn't there for the bundled mpv-runtime build,
+            # so "open URL" silently only works for direct media links.
+            script_opts += f",ytdl_hook-ytdl_path={ytdlp}"
 
         self._mpv = mpv.MPV(
             wid=str(int(self.winId())),
