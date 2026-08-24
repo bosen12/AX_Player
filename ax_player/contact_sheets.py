@@ -65,7 +65,14 @@ def probe_duration(video: Path) -> float | None:
                 str(video),
             ],
             capture_output=True,
-            text=True,
+            # Explicit UTF-8 rather than text=True's locale-dependent decode
+            # -- mpv's own stdout (other --quiet chatter, non-ASCII in the
+            # video's path) is UTF-8, but Python's default text-mode decode
+            # follows the system ANSI codepage (e.g. cp950 on a zh-TW
+            # machine), which raises UnicodeDecodeError on the first
+            # multi-byte character and silently kills every probe.
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )

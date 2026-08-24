@@ -50,7 +50,8 @@ def query_gpu() -> dict:
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=4,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
