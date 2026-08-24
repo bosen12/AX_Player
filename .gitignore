@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Fetched by setup_mpv.py -- large, frequently-updated binaries that
+# don't belong in git. Everything else in mpv-runtime/ (uosc, thumbfast,
+# fonts, configs) is small and checked in directly.
+/mpv-runtime/mpv.exe
+/mpv-runtime/libmpv-2.dll

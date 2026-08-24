@@ -14,15 +14,37 @@ def is_video_file(path: Path) -> bool:
 
 
 @lru_cache(maxsize=1)
+def bundled_mpv_root() -> Path:
+    """The slim mpv runtime shipped alongside AX Player itself.
+
+    The scripts/fonts/configs in here are checked into the repo directly
+    (small, stable text/lua files); mpv.exe and libmpv-2.dll are not --
+    run setup_mpv.py to fetch the official build into this folder.
+    """
+    return Path(__file__).parent.parent / "mpv-runtime"
+
+
+@lru_cache(maxsize=1)
 def default_mpv_root() -> Path:
     # Cached: this is re-derived from libmpv_dll()/mpv_exe() on every
     # thumbnail job (one per playlist row, run in a thread pool) and doesn't
     # change during the process's lifetime.
-    candidates = [Path(r"C:\mpv"), Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "mpv"]
+    #
+    # bundled_mpv_root() is checked first so a fresh install "just works"
+    # off setup_mpv.py alone. On a machine that also has a full personal
+    # mpv setup at C:\mpv (uosc, thumbfast, Anime4K shaders, Fluid Motion
+    # IPC scripts already configured there), that one is still picked up
+    # automatically as a fallback -- but only once bundled_mpv_root() has
+    # no libmpv-2.dll of its own, i.e. setup_mpv.py was never run there.
+    candidates = [
+        bundled_mpv_root(),
+        Path(r"C:\mpv"),
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "mpv",
+    ]
     for path in candidates:
         if (path / "libmpv-2.dll").is_file():
             return path
-    return Path(r"C:\mpv")
+    return bundled_mpv_root()
 
 
 def libmpv_dll() -> Path | None:

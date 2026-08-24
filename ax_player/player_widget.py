@@ -8,7 +8,7 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
-from ax_player.paths import default_mpv_root, libmpv_dll
+from ax_player.paths import default_mpv_root, libmpv_dll, mpv_exe
 
 _dll = libmpv_dll()
 if _dll is not None:
@@ -114,6 +114,15 @@ class PlayerWidget(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        script_opts = "uosc-top_bar=never"
+        exe = mpv_exe()
+        if exe is not None:
+            # thumbfast spawns its own mpv.exe subprocess for hover-preview
+            # thumbnails and needs to be told where it is explicitly --
+            # its auto-detection depends on a frontend setting
+            # user-data/frontend/process-path, which python-mpv doesn't.
+            script_opts += f",thumbfast-mpv_path={exe}"
+
         self._mpv = mpv.MPV(
             wid=str(int(self.winId())),
             config=True,
@@ -136,7 +145,7 @@ class PlayerWidget(QWidget):
             # shell knowing, hanging the app. Overriding it here (not in the
             # shared uosc.conf) only affects this embedded instance --
             # standalone mpv still gets its own top bar as configured.
-            script_opts="uosc-top_bar=never",
+            script_opts=script_opts,
             log_handler=None,
         )
         self._list_file: Path | None = None
