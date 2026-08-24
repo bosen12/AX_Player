@@ -80,6 +80,10 @@ class Bridge(QObject):
     def openUrl(self, url: str) -> None:  # noqa: N802
         self._c.play_url(url)
 
+    @Slot()
+    def promptUrl(self) -> None:  # noqa: N802
+        self._c.pick_url()
+
     @Slot(bool)
     def setRecursive(self, on: bool) -> None:  # noqa: N802
         self._c.set_recursive(bool(on))

@@ -164,23 +164,6 @@ function applyFilter() {
   }
 }
 
-/* ── URL modal ────────────────────────────────────────────── */
-function openUrlModal() {
-  $("urlInput").value = "";
-  $("urlModalOverlay").classList.remove("is-hidden");
-  $("urlInput").focus();
-}
-
-function closeUrlModal() {
-  $("urlModalOverlay").classList.add("is-hidden");
-}
-
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("urlModalOverlay").classList.contains("is-hidden")) {
-    closeUrlModal();
-  }
-});
-
 /* ── stage geometry ───────────────────────────────────────── */
 // #stage is empty on purpose: mpv is a native widget positioned to exactly
 // cover it, and the web view is masked to a hole there (see app.py) so mouse
@@ -211,17 +194,7 @@ function setupChrome() {
   $("btnFluid").addEventListener("click", () => state.bridge.toggleFluidMotion());
   $("btnOpenFolder").addEventListener("click", () => state.bridge.openFolder());
   $("btnOpenFile").addEventListener("click", () => state.bridge.openFile());
-  $("btnOpenUrl").addEventListener("click", openUrlModal);
-  $("urlCancel").addEventListener("click", closeUrlModal);
-  $("urlModalOverlay").addEventListener("click", (event) => {
-    if (event.target === $("urlModalOverlay")) closeUrlModal();
-  });
-  $("urlForm").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const url = $("urlInput").value.trim();
-    closeUrlModal();
-    if (url) state.bridge.openUrl(url);
-  });
+  $("btnOpenUrl").addEventListener("click", () => state.bridge.promptUrl());
   $("chkRecursive").addEventListener("change", (event) => {
     state.bridge.setRecursive(event.target.checked);
   });

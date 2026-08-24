@@ -9,7 +9,7 @@ from PySide6.QtGui import QIcon, QRegion
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressDialog, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QProgressDialog, QWidget
 
 from ax_player import resume
 from ax_player.bridge import Bridge, to_url
@@ -281,6 +281,17 @@ class AXPlayerWindow(QWidget):
         )
         if path:
             self.play(Path(path))
+
+    def pick_url(self) -> None:
+        # A native dialog, not an HTML overlay in the web page: the video
+        # stage is a real hole punched in the web view (see
+        # _apply_stage_mask) so mpv is visible/clickable through it, and an
+        # HTML modal centered on the window would render mostly or entirely
+        # inside that hole -- invisible, even though its own JS logic works.
+        # A native Qt dialog isn't subject to that at all.
+        url, ok = QInputDialog.getText(self, "開啟網址", "輸入影片網址：")
+        if ok and url.strip():
+            self.play_url(url.strip())
 
     def open_folder(self, folder: Path, select: Path | None = None) -> None:
         self._folder = folder
