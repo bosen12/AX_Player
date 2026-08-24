@@ -112,6 +112,12 @@ def thumbnail_cache_dir() -> Path:
     return path
 
 
+def contact_sheet_cache_dir() -> Path:
+    path = app_data_dir() / "contact_sheets"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def resume_db_path() -> Path:
     return app_data_dir() / "resume.json"
 

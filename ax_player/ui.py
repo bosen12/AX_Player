@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -527,6 +527,65 @@ class DiagnosticsPanel(QWidget):
         return f"輸出幀率偏低 · {output:.1f} / {source:.1f} fps", False
 
 
+class ContactSheetPopup(QWidget):
+    """The floating preview: a real top-level window, not a child widget.
+
+    That distinction matters here specifically -- everything else in this
+    app that draws over the video has to live inside AXPlayerWindow's own
+    layout, next to PlayerWidget, because a child widget stacked in front of
+    mpv's native surface is invisible (see the module docstring in app.py).
+    A *separate* top-level window has its own place in the OS window
+    z-order and isn't subject to that at all, which is exactly what a hover
+    popup needs anyway.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        # A QObject parent for lifetime cleanup only -- the Window-type flags
+        # below are what make Qt treat this as a top-level window rather than
+        # a child embedded in parent's layout.
+        super().__init__(
+            parent,
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setObjectName("sheetPopup")
+        self.setStyleSheet(
+            f"""
+            QWidget#sheetPopup {{
+                background: {PAPER_2};
+                border: 1px solid {RULE};
+                border-radius: 8px;
+            }}
+            QLabel {{ color: {MUTED}; font-family: {FONT_UI}; font-size: 12px; background: transparent; }}
+            """
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self._label = QLabel(self)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._label)
+
+    def show_loading(self, top_left) -> None:
+        self._label.setText("正在產生預覽…")
+        self._label.setFixedSize(200, 60)
+        self.adjustSize()
+        self.move(top_left)
+        self.show()
+
+    def show_image(self, pixmap: QPixmap, top_left) -> None:
+        self._label.setPixmap(pixmap)
+        self._label.setFixedSize(pixmap.size())
+        self.adjustSize()
+        self.move(top_left)
+        self.show()
+
+    def hide_now(self) -> None:
+        self.hide()
+
+
 class Sidebar(QWidget):
     """Library browser: open actions, search, and the folder's video list."""
 
@@ -538,6 +597,7 @@ class Sidebar(QWidget):
     play_requested = Signal(str)
     remove_requested = Signal(list)
     thumb_requested = Signal(str)
+    sheet_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -647,6 +707,19 @@ class Sidebar(QWidget):
         self._list.hide()
         layout.addWidget(self._list, 1)
 
+        # Hover preview: itemEntered only fires on *entering* a new row, so
+        # leaving the list entirely (mouse exits the viewport without
+        # crossing into another row) needs its own signal -- an event filter
+        # on the viewport for QEvent.Leave.
+        self._list.itemEntered.connect(self._on_item_entered)
+        self._list.viewport().installEventFilter(self)
+        self._hover_path: str | None = None
+        self._hover_delay = QTimer(self)
+        self._hover_delay.setSingleShot(True)
+        self._hover_delay.setInterval(350)  # hover-intent debounce
+        self._hover_delay.timeout.connect(self._commit_hover)
+        self._sheet_popup = ContactSheetPopup(self)
+
         delete_key = QShortcut(QKeySequence(Qt.Key.Key_Delete), self._list)
         delete_key.setContext(Qt.ShortcutContext.WidgetShortcut)
         delete_key.activated.connect(self._emit_remove)
@@ -697,6 +770,9 @@ class Sidebar(QWidget):
         self._search.clear()
         self._list.clear()
         self._rows.clear()
+        self._hover_delay.stop()
+        self._hover_path = None
+        self._sheet_popup.hide_now()
 
         for entry in items:
             item = QListWidgetItem(entry["name"])
@@ -746,6 +822,44 @@ class Sidebar(QWidget):
         path = item.data(PATH_ROLE)
         if path:
             self.play_requested.emit(str(path))
+
+    # -- hover preview -----------------------------------------------------
+    def _on_item_entered(self, item: QListWidgetItem) -> None:
+        path = item.data(PATH_ROLE)
+        self._hover_path = str(path) if path else None
+        self._hover_delay.stop()
+        self._sheet_popup.hide_now()
+        if self._hover_path:
+            self._hover_delay.start()
+
+    def _commit_hover(self) -> None:
+        if not self._hover_path:
+            return
+        self._sheet_popup.show_loading(self._popup_pos())
+        self.sheet_requested.emit(self._hover_path)
+
+    def show_contact_sheet(self, path: str, pixmap: QPixmap) -> None:
+        # A slow generation can finish after the hover has already moved to
+        # another row (or left the list) -- stale results are dropped rather
+        # than popping a preview for something the user isn't over any more.
+        if path != self._hover_path:
+            return
+        if pixmap.isNull():
+            self._sheet_popup.hide_now()
+            return
+        self._sheet_popup.show_image(pixmap, self._popup_pos())
+
+    def _popup_pos(self) -> QPoint:
+        # To the right of the sidebar, roughly level with the row -- clear of
+        # the row itself so the popup never covers what triggered it.
+        return self.mapToGlobal(QPoint(self.width(), 8))
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self._list.viewport() and event.type() == event.Type.Leave:
+            self._hover_delay.stop()
+            self._hover_path = None
+            self._sheet_popup.hide_now()
+        return super().eventFilter(obj, event)
 
     def _on_item_activated(self, item: QListWidgetItem) -> None:
         path = item.data(PATH_ROLE)

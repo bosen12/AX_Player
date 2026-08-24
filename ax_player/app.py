@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtGui import QColor, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ax_player import debug_log, diagnostics, resume, settings, ui
+from ax_player import contact_sheets, debug_log, diagnostics, resume, settings, ui
 from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file
 from ax_player.player_widget import PlayerWidget
 from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
@@ -58,6 +58,31 @@ class _PruneCacheJob(QRunnable):
     @Slot()
     def run(self) -> None:
         prune_thumbnail_cache()
+        contact_sheets.prune_contact_sheet_cache()
+
+
+class _SheetSignals(QObject):
+    done = Signal(str, str)  # video path, sheet image path ("" on failure)
+
+
+class _SheetJob(QRunnable):
+    """Grabs FRAME_COUNT frames and composes them -- several seconds of mpv
+    subprocess work, so this shares _thumb_pool's cap rather than running
+    unbounded: it is exactly the same kind of GPU-decode-subprocess load as
+    a thumbnail grab, just repeated, and the concurrency limit exists
+    because too many of these at once is what produces "thumbfast: cannot
+    create mpv subprocess" (too many simultaneous GPU decode sessions).
+    """
+
+    def __init__(self, video: Path, signals: _SheetSignals):
+        super().__init__()
+        self._video = video
+        self._signals = signals
+
+    @Slot()
+    def run(self) -> None:
+        path = contact_sheets.generate_contact_sheet(self._video)
+        self._signals.done.emit(str(self._video), str(path) if path else "")
 
 
 def _sort_playlist(paths: list[Path], mode: str) -> list[Path]:
@@ -219,6 +244,9 @@ class AXPlayerWindow(QWidget):
         self.sidebar.play_requested.connect(lambda p: self.play(Path(p)))
         self.sidebar.remove_requested.connect(self.remove_from_playlist)
         self.sidebar.thumb_requested.connect(lambda p: self.request_thumbnail(Path(p)))
+        self.sidebar.sheet_requested.connect(self.request_contact_sheet)
+        self._sheet_signals = _SheetSignals()
+        self._sheet_signals.done.connect(self._on_sheet_done)
 
         self.player = PlayerWidget(self)
         self.player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -469,6 +497,21 @@ class AXPlayerWindow(QWidget):
     def _on_thumb_done(self, path: str, image_path: str) -> None:
         if image_path:
             self.sidebar.set_thumbnail(path, ui.thumbnail_pixmap(image_path))
+
+    def request_contact_sheet(self, path: str) -> None:
+        video = Path(path)
+        cached = contact_sheets.cached_sheet_path(video)
+        if cached.is_file() and cached.stat().st_size > 0:
+            # Already on disk (a repeat hover, or generated in an earlier
+            # session): load and hand it back directly rather than paying a
+            # thread hop for a case that should feel instant.
+            self.sidebar.show_contact_sheet(path, ui.thumbnail_pixmap(cached))
+            return
+        self._thumb_pool.start(_SheetJob(video, self._sheet_signals))
+
+    def _on_sheet_done(self, path: str, image_path: str) -> None:
+        pixmap = ui.thumbnail_pixmap(image_path) if image_path else QPixmap()
+        self.sidebar.show_contact_sheet(path, pixmap)
 
     # -- drag & drop ---------------------------------------------------------
     # A real dragged hyperlink sets text/uri-list (hasUrls()), but dragged
