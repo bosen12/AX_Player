@@ -1,6 +1,6 @@
 # AX Player
 
-一個把 [mpv](https://mpv.io/) 直接嵌入視窗的桌面播放器。介面（無邊框標題列、側邊欄片庫）用 PySide6 + QWebEngine（HTML/CSS/JS）畫，但播放本身——進度條、縮圖預覽、快捷鍵、全螢幕、字幕/音軌切換——完全交給嵌入的 mpv 自己處理，透過 [uosc](https://github.com/tomasklaen/uosc) 和 [thumbfast](https://github.com/po5/thumbfast) 這兩個 mpv 腳本畫在畫面上。這個專案刻意不重新實作 mpv 已經做得很好的東西，只補上「資料夾片庫」跟「視窗殼」這兩塊 mpv 本身沒有的功能。
+一個把 [mpv](https://mpv.io/) 直接嵌入視窗的桌面播放器。介面（無邊框標題列、側邊欄片庫）用 PySide6 原生 Qt widgets 畫，但播放本身——進度條、縮圖預覽、快捷鍵、全螢幕、字幕/音軌切換——完全交給嵌入的 mpv 自己處理，透過 [uosc](https://github.com/tomasklaen/uosc) 和 [thumbfast](https://github.com/po5/thumbfast) 這兩個 mpv 腳本畫在畫面上。這個專案刻意不重新實作 mpv 已經做得很好的東西，只補上「資料夾片庫」跟「視窗殼」這兩塊 mpv 本身沒有的功能。
 
 ## 特色
 
@@ -52,7 +52,7 @@ build.bat
 
 會裝 `pyinstaller`，用 [`AXPlayer.spec`](AXPlayer.spec) 打包，完成後複製一份到專案根目錄的 `AXPlayer\` 資料夾（裡面是 `AXPlayer.exe` 加上它的依賴檔案）。是資料夾而不是單一檔案（`--onedir` 而非 `--onefile`）——這樣每次啟動不用先把整包解壓縮到 `%TEMP%`，開啟速度快很多；分發時把整個 `AXPlayer\` 資料夾一起帶著走即可，捷徑指到裡面的 `AXPlayer.exe`。
 
-打包進 exe 裡的東西：Python 執行環境、PySide6/QtWebEngine、`ax_player/web`、`ax_player/resources`，以及 `mpv-runtime/` 裡**小的**那些檔案（uosc、thumbfast、字型、`mpv.conf`/`input.conf`）。**`mpv.exe`/`libmpv-2.dll` 不會被打包進 exe**——太大、更新太頻繁。
+打包進 exe 裡的東西：Python 執行環境、PySide6（QtWidgets，不含 QtWebEngine）、`ax_player/resources`，以及 `mpv-runtime/` 裡**小的**那些檔案（uosc、thumbfast、字型、`mpv.conf`/`input.conf`）。**`mpv.exe`/`libmpv-2.dll` 不會被打包進 exe**——太大、更新太頻繁。
 
 打包好的 `AXPlayer.exe` 第一次啟動時，如果偵測不到任何可用的 mpv（`C:\mpv`、`%ProgramFiles%\mpv` 都沒有），會自動彈出一個小視窗顯示「正在準備播放引擎」，背景下載官方 mpv 建置到 `%LOCALAPPDATA%\AXPlayer\mpv-runtime\`，下載一次之後所有後續啟動都是瞬間開啟。整個過程不需要使用者自己跑 `setup_mpv.py` 或碰任何指令——這就是單一 exe 分發的意義：對方只要有網路，雙擊執行檔就好。
 
@@ -118,7 +118,8 @@ AX_Player/
 └── ax_player/
     ├── app.py                 # 主視窗、資料夾掃描、播放清單、
     │                           #   打包版首次啟動的 mpv 下載流程
-    ├── bridge.py               # QWebChannel：HTML 介面 <-> Python
+    ├── ui.py                   # 原生 Qt 介面：標題列、側邊欄片庫、清單繪製
+    ├── debug_log.py             # 寫到 %LOCALAPPDATA%\AXPlayer\debug.log 的診斷紀錄
     ├── player_widget.py         # 嵌入 mpv 的核心：wid 嵌入、滑鼠/鍵盤事件轉發、
     │                             #   Fluid Motion 整合、進度輪詢
     ├── paths.py                 # mpv 路徑解析、快取目錄、打包/原始碼路徑判斷
@@ -126,17 +127,17 @@ AX_Player/
     │                             #   打包版首次啟動流程共用）
     ├── thumbnails.py            # 縮圖產生 + 快取淘汰
     ├── resume.py                 # 播放進度的小型 JSON 儲存
-    ├── resources/                # 應用程式圖示
-    └── web/                      # 介面：index.html / app.js / style.css
+    └── resources/                # 應用程式圖示
 ```
 
 ## 架構概念
 
 AX Player 的核心設計原則：**mpv 已經把播放器這件事做得很好了，不要重做**。
 
-- 影片畫面是一個真正嵌入（`wid=`）的原生 mpv 視窗，疊在 QWebEngineView 之下；HTML 頁面在影片區域會被「挖一個洞」（`QWidget.setMask`），滑鼠事件才能真正穿透到 mpv
+- 影片畫面是一個真正嵌入（`wid=`）的原生 mpv 視窗，跟側邊欄一樣只是 layout 裡的一個 widget——影片前面沒有任何東西擋著，滑鼠事件直接進 mpv
 - 在 Windows 上，libmpv 用 `wid` 嵌入時建立的子視窗是 `WS_DISABLED`，原生收不到滑鼠/鍵盤事件（[mpv-player/mpv#6762](https://github.com/mpv-player/mpv/issues/6762)）——`player_widget.py` 因此手動把 Qt 收到的滑鼠移動/點擊/滾輪、鍵盤按下/放開，轉發成 mpv 自己的 `mouse`/`keydown`/`keyup`/`keypress` 指令，這也是 uosc 的 hover 顯示時間軸、thumbfast 的縮圖預覽能運作的原因
-- Python 與 HTML 介面之間只透過一個很薄的 `QWebChannel` bridge 溝通（`bridge.py`），只處理視窗殼跟片庫，不碰任何播放邏輯
+- 介面本身（`ui.py`）是純 Qt widgets，只處理視窗殼跟片庫，不碰任何播放邏輯。早期版本是用 QWebEngine（HTML/CSS/JS）畫的，但那等於每次啟動都要開一個完整的 Chromium 行程只為了畫一份檔案清單——而且因為影片要透過「在網頁上挖洞」（`QWidget.setMask`）才能露出來，衍生出一整類問題：全螢幕白邊、對話框畫在洞裡看不見、深色樣式套用前的白閃。改成原生 widgets 之後這些在結構上都不存在了，啟動也少掉 Chromium 那段固定成本
+- 播放清單用 `QStyledItemDelegate` 繪製而不是一列一個 widget：一個資料夾可能有上千個檔案。縮圖也只在該列真的被畫出來時才去產生（等同於原本 HTML 版的 IntersectionObserver 延遲載入）
 
 ## 授權
 

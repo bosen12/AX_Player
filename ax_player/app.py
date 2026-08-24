@@ -5,39 +5,30 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, QObject, QRect, QRunnable, QThread, QThreadPool, QUrl, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QIcon, QRegion
-from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QProgressDialog, QWidget
+from PySide6.QtCore import QEventLoop, QObject, QRunnable, QThread, QThreadPool, QUrl, Qt, Signal, Slot
+from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QInputDialog,
+    QMessageBox,
+    QProgressDialog,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
-from ax_player import debug_log, resume
-from ax_player.bridge import Bridge, to_url
-from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file, web_dir
+from ax_player import debug_log, resume, ui
+from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file
 from ax_player.player_widget import PlayerWidget
 from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
 
 RESIZE_MARGIN = 6
 
-# Mirrors style.css's --sidebar-w / --titlebar-h. Used only to give the
-# player widget a correct initial geometry before the web page's own
-# ResizeObserver -> QWebChannel round trip has had a chance to report the
-# real stage rect (see the comment in AXPlayerWindow.__init__) -- the JS
-# side remains the source of truth for actual layout once it catches up.
-SIDEBAR_W = 312
-TITLEBAR_H = 40
-
-
-class _LoggingPage(QWebEnginePage):
-    """Surfaces JS errors on stderr -- otherwise a broken handler fails silently."""
-
-    def javaScriptConsoleMessage(self, level, message, line, source):  # noqa: N802
-        print(f"[web:{line}] {message}", file=sys.stderr, flush=True)
-
 
 class _JobSignals(QObject):
-    thumb_done = Signal(str, str)
+    thumb_done = Signal(str, str)  # video path, thumbnail image path ("" on failure)
 
 
 class _ThumbJob(QRunnable):
@@ -49,7 +40,7 @@ class _ThumbJob(QRunnable):
     @Slot()
     def run(self) -> None:
         path = generate_thumbnail(self._video)
-        self._signals.thumb_done.emit(str(self._video), to_url(path) if path else "")
+        self._signals.thumb_done.emit(str(self._video), str(path) if path else "")
 
 
 class _PruneCacheJob(QRunnable):
@@ -91,28 +82,35 @@ class _ScanJob(QRunnable):
 
 
 class AXPlayerWindow(QWidget):
-    """Frameless shell: a web view draws the chrome + library sidebar, and
-    mpv (with the user's own uosc/thumbfast scripts) owns everything about
-    actually playing video -- controls, seek bar, hover previews, playlist
+    """Frameless shell: native Qt chrome + library sidebar (see ui.py), with
+    mpv -- running the user's own uosc/thumbfast scripts -- owning everything
+    about actually playing video: controls, seek bar, hover previews, playlist
     advance, resume-on-reopen. This app supplies the window and the browsable
     folder view; it does not reimplement a player mpv already has tuned.
+
+    The sidebar and mpv are plain siblings in a layout. There is no overlay,
+    no mask, and no cross-process compositor in front of the video, which is
+    what the previous QWebEngineView-based shell required.
     """
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AX Player")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        # The window's own default background is white, and QWebEngineView
-        # paints white until Chromium has loaded and applied the page's own
-        # dark CSS -- both show through for a frame or two on launch
-        # otherwise, as a white flash behind/around the mpv widget.
-        self.setStyleSheet("background-color: #171310;")
         self.setMinimumSize(860, 520)
         self.setMouseTracking(True)
         self.resize(1320, 780)
         icon_file = icon_path()
         if icon_file.is_file():
             self.setWindowIcon(QIcon(str(icon_file)))
+
+        # Palette rather than a stylesheet: a stylesheet set on the window
+        # propagates to every descendant, PlayerWidget included, and would
+        # paint over the surface mpv renders into.
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(ui.PAPER))
+        self.setPalette(palette)
 
         self._folder: Path | None = None
         self._playlist: list[Path] = []
@@ -142,112 +140,64 @@ class AXPlayerWindow(QWidget):
 
         self._thumb_pool.start(_PruneCacheJob())
 
-        self.web = QWebEngineView(self)
-        self.web.setPage(_LoggingPage(self.web))
-        settings = self.web.settings()
-        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, False)
-        self.web.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
-        self.web.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        # Same white-flash cause as above but inside Chromium itself: its
-        # default page background is white until index.html's CSS paints
-        # over it, which loses the race with the window becoming visible.
-        self.web.page().setBackgroundColor(QColor("#171310"))
+        self.titlebar = ui.TitleBar(self)
+        self.titlebar.minimize_clicked.connect(self.showMinimized)
+        self.titlebar.maximize_clicked.connect(self.toggle_maximize)
+        self.titlebar.close_clicked.connect(self.close)
+        self.titlebar.fluid_clicked.connect(self.toggle_fluid_motion)
+        self.titlebar.drag_started.connect(self.start_window_drag)
 
-        self.bridge = Bridge(self)
-        channel = QWebChannel(self)
-        channel.registerObject("bridge", self.bridge)
-        self.web.page().setWebChannel(channel)
-        self.web.load(QUrl.fromLocalFile(str(web_dir() / "index.html")))
+        self.sidebar = ui.Sidebar(self)
+        self.sidebar.open_folder_clicked.connect(self.pick_folder)
+        self.sidebar.open_file_clicked.connect(self.pick_file)
+        self.sidebar.open_url_clicked.connect(self.pick_url)
+        self.sidebar.recursive_changed.connect(self.set_recursive)
+        self.sidebar.play_requested.connect(lambda p: self.play(Path(p)))
+        self.sidebar.remove_requested.connect(self.remove_from_playlist)
+        self.sidebar.thumb_requested.connect(lambda p: self.request_thumbnail(Path(p)))
 
-        # mpv sits *behind* the web view. The web view is masked to a hole
-        # over the stage rect (see set_stage_geometry) so mouse input actually
-        # reaches mpv/uosc there instead of being captured by the (visually
-        # transparent, but still input-opaque) native web widget on top.
         self.player = PlayerWidget(self)
-        self.player.title_changed.connect(self.bridge.titleChanged.emit)
+        self.player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.player.setMinimumSize(320, 180)
+        self.player.title_changed.connect(self.titlebar.set_title)
         self.player.path_changed.connect(self._on_path_changed)
         self.player.fullscreen_changed.connect(self._on_mpv_fullscreen)
         self.player.files_dropped.connect(self.open_dropped)
         self.player.progress_changed.connect(self._on_progress)
-        self.player.fluid_active_changed.connect(self.bridge.fluidActiveChanged.emit)
-        self.player.lower()
-        self.web.raise_()
-        self.player.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.player.fluid_active_changed.connect(self.titlebar.set_fluid_active)
 
-        # Give the player widget a real geometry immediately, instead of
-        # leaving it at Qt's default QRect(0, 0, 100, 30) until the web
-        # page's own ResizeObserver -> QWebChannel round trip reports the
-        # real stage rect -- confirmed by direct testing to take several
-        # seconds after launch. Calling play_url() in that window (e.g. the
-        # user pastes a URL right after opening the app -- a completely
-        # normal thing to do) played back correctly but rendered into that
-        # tiny 100x30 corner, indistinguishable from nothing happening at
-        # all. reportStageGeometry() still corrects/confirms this once it
-        # fires; this only covers the gap before it does.
-        #
-        # _apply_stage_mask() computes the mask from self.web.rect(), which
-        # is still Qt's default small size at this point in __init__ --
-        # self.web only gets sized to the full window in resizeEvent, which
-        # hasn't fired yet (the window isn't shown yet). Size it here first,
-        # or the mask ends up computed against that stale tiny rect and the
-        # sidebar/titlebar don't render at all until the first real resize.
-        self.web.setGeometry(self.rect())
-        self._stage_rect = QRect(
-            SIDEBAR_W, TITLEBAR_H, max(1, self.width() - SIDEBAR_W), max(1, self.height() - TITLEBAR_H)
-        )
-        self._apply_stage_mask()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(RESIZE_MARGIN, RESIZE_MARGIN, RESIZE_MARGIN, RESIZE_MARGIN)
+        root.setSpacing(0)
+        root.addWidget(self.titlebar)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self.sidebar)
+        body.addWidget(self.player, 1)
+        root.addLayout(body, 1)
+
         self.setAcceptDrops(True)
 
-    # -- layout --------------------------------------------------------
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        if self.isFullScreen():
-            # The web view is hidden during fullscreen entirely (see
-            # _on_mpv_fullscreen) -- nothing to give it geometry for. Just
-            # keep the player widget filling the window in case it resizes
-            # while still fullscreen (moved to another monitor, DPI change).
-            rect = self.rect()
-            self._stage_rect = QRect(rect)
-            self.player.setGeometry(rect)
-        else:
-            self.web.setGeometry(self.rect())
-        super().resizeEvent(event)
-
-    def set_stage_geometry(self, x: int, y: int, w: int, h: int) -> None:
-        rect = QRect(x, y, max(1, w), max(1, h))
-        if rect == self._stage_rect:
-            return
-        self._stage_rect = rect
-        self._apply_stage_mask()
-
-    def _apply_stage_mask(self) -> None:
-        rect = self._stage_rect
-        if not rect.isValid():
-            return
-        self.player.setGeometry(rect)
-        self.player.show()
-        # Punch a real input hole in the web view: everything outside `rect`
-        # stays a normal interactive page; inside it, clicks/drags fall
-        # through to the mpv widget beneath.
-        mask = QRegion(self.web.rect())
-        mask -= QRegion(rect)
-        self.web.setMask(mask)
-
     # -- frameless chrome -------------------------------------------------
-    def minimize_window(self) -> None:
-        self.showMinimized()
-
     def toggle_maximize(self) -> None:
         self.showNormal() if self.isMaximized() else self.showMaximized()
-        self.bridge.maximizedChanged.emit(self.isMaximized())
-
-    def close_window(self) -> None:
-        self.close()
 
     def start_window_drag(self) -> None:
         handle = self.windowHandle()
         if handle is not None:
             handle.startSystemMove()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        # The window keeps a RESIZE_MARGIN border of its own around the
+        # content purely so all four edges belong to the window itself and
+        # can start a native resize. Maximized/fullscreen can't be resized
+        # by dragging anyway, and the border would just be a dead frame.
+        layout = self.layout()
+        if layout is not None:
+            margin = 0 if (self.isMaximized() or self.isFullScreen()) else RESIZE_MARGIN
+            layout.setContentsMargins(margin, margin, margin, margin)
+        super().changeEvent(event)
 
     def _edges_at(self, pos) -> Qt.Edges:
         edges = Qt.Edge(0)
@@ -260,6 +210,23 @@ class AXPlayerWindow(QWidget):
         if pos.y() >= self.height() - RESIZE_MARGIN:
             edges |= Qt.Edge.BottomEdge
         return edges
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if not (self.isMaximized() or self.isFullScreen()):
+            edges = self._edges_at(event.position().toPoint())
+            horizontal = edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge)
+            vertical = edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge)
+            if horizontal and vertical:
+                diagonal = bool(edges & Qt.Edge.LeftEdge) == bool(edges & Qt.Edge.TopEdge)
+                shape = Qt.CursorShape.SizeFDiagCursor if diagonal else Qt.CursorShape.SizeBDiagCursor
+            elif horizontal:
+                shape = Qt.CursorShape.SizeHorCursor
+            elif vertical:
+                shape = Qt.CursorShape.SizeVerCursor
+            else:
+                shape = Qt.CursorShape.ArrowCursor
+            self.setCursor(shape)
+        super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and not self.isMaximized():
@@ -275,37 +242,17 @@ class AXPlayerWindow(QWidget):
     def _on_mpv_fullscreen(self, on: bool) -> None:
         # uosc's own fullscreen button sets mpv's `fullscreen` property, which
         # does nothing to an embedded (wid=) window on its own -- this is what
-        # actually fullscreens the Qt window and hides the sidebar/titlebar.
-        #
-        # The white-gap bug wasn't actually a geometry-timing race in our own
-        # code: QWebEngineView's Chromium surface lives in a separate process
-        # and resizes over IPC, asynchronously from the Qt widget's own
-        # geometry change. Even a perfectly-timed mask update can still lose
-        # that race and show Chromium's blank/unpainted backing store in the
-        # newly-exposed area -- no amount of retiming set_stage_geometry()
-        # fixes that, because the mask was never the bottleneck.
-        #
-        # The actual fix: don't ask the web view to paint anything during
-        # fullscreen at all. It only ever draws the sidebar/titlebar, and
-        # neither exists in fullscreen -- so hide it outright instead of
-        # masking around it, and let mpv's own native surface (which paints
-        # itself, no Chromium/IPC involved) cover the whole screen with
-        # nothing else in front of it to race against.
+        # actually fullscreens the Qt window and hides the chrome. With the
+        # sidebar/titlebar simply hidden, the layout gives mpv the whole
+        # window, and there is no second surface left to race against (which
+        # is what produced the white gap back when a Chromium view had to
+        # resize over IPC to get out of the way).
         if on and not self.isFullScreen():
             self.showFullScreen()
         elif not on and self.isFullScreen():
             self.showNormal()
-        if on:
-            self.web.hide()
-            screen = self.screen()
-            geo = screen.geometry() if screen is not None else self.rect()
-            self._stage_rect = QRect(0, 0, geo.width(), geo.height())
-            self.player.setGeometry(self._stage_rect)
-            self.player.show()
-        else:
-            self.web.setMask(QRegion())
-            self.web.show()
-        self.bridge.fullscreenChanged.emit(on)
+        self.titlebar.setVisible(not on)
+        self.sidebar.setVisible(not on)
 
     # -- library -----------------------------------------------------------
     def pick_folder(self) -> None:
@@ -322,12 +269,6 @@ class AXPlayerWindow(QWidget):
             self.play(Path(path))
 
     def pick_url(self) -> None:
-        # A native dialog, not an HTML overlay in the web page: the video
-        # stage is a real hole punched in the web view (see
-        # _apply_stage_mask) so mpv is visible/clickable through it, and an
-        # HTML modal centered on the window would render mostly or entirely
-        # inside that hole -- invisible, even though its own JS logic works.
-        # A native Qt dialog isn't subject to that at all.
         url, ok = QInputDialog.getText(self, "開啟網址", "輸入影片網址：")
         debug_log.log(f"pick_url: ok={ok} raw={url!r}")
         if ok and url.strip():
@@ -343,15 +284,17 @@ class AXPlayerWindow(QWidget):
         if folder != self._folder:
             return  # a newer open_folder() call already superseded this scan
         self._playlist = [Path(p) for p in paths]
-        items = [
-            {"path": str(p), "name": p.name, "progress": resume.get_progress(str(p))}
-            for p in self._playlist
-        ]
-        self.bridge.folderOpened.emit(folder.name or str(folder), items)
+        self.sidebar.set_items(folder.name or str(folder), self._playlist_items())
         select = Path(select_str) if select_str else None
         index = self._playlist.index(select) if select in self._playlist else 0
         self.player.load_playlist(self._playlist, index)
         self.player.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _playlist_items(self) -> list[dict]:
+        return [
+            {"path": str(p), "name": p.name, "progress": resume.get_progress(str(p))}
+            for p in self._playlist
+        ]
 
     def set_recursive(self, on: bool) -> None:
         self._recursive = on
@@ -387,33 +330,33 @@ class AXPlayerWindow(QWidget):
         ):
             self.player.remove_index(index)
         self._playlist = [p for p in self._playlist if p not in remove_set]
-        items = [
-            {"path": str(p), "name": p.name, "progress": resume.get_progress(str(p))}
-            for p in self._playlist
-        ]
-        folder_name = self._folder.name or str(self._folder) if self._folder else ""
-        self.bridge.folderOpened.emit(folder_name, items)
+        folder_name = (self._folder.name or str(self._folder)) if self._folder else ""
+        self.sidebar.set_items(folder_name, self._playlist_items())
 
     def toggle_fluid_motion(self) -> None:
         self.player.toggle_fluid_motion()
 
     def _on_path_changed(self, path: str) -> None:
-        self.bridge.nowPlaying.emit(str(Path(path)))
+        self.sidebar.set_playing(str(Path(path)))
 
     def _on_progress(self, path: str, pos: float, duration: float) -> None:
         resume.save_progress(path, pos, duration)
-        self.bridge.progressUpdated.emit(path, pos, duration)
+        self.sidebar.set_progress(path, pos, duration)
 
-    def _on_thumb_done(self, path: str, url: str) -> None:
-        if url:
-            self.bridge.thumbnailReady.emit(path, url)
+    def _on_thumb_done(self, path: str, image_path: str) -> None:
+        if image_path:
+            self.sidebar.set_thumbnail(path, ui.thumbnail_pixmap(image_path))
 
     # -- drag & drop ---------------------------------------------------------
-    # See PlayerWidget's identical comment: a real dragged hyperlink sets
-    # text/uri-list (hasUrls()), but dragged plain URL text usually only
-    # sets text/plain, which hasUrls() ignores -- fall back to it, one URL
-    # per line, same as the web-page drop handler (app.js) already does.
+    # A real dragged hyperlink sets text/uri-list (hasUrls()), but dragged
+    # plain URL text usually only sets text/plain, which hasUrls() ignores --
+    # fall back to it, one URL per line. Children that don't accept drops
+    # (the sidebar and its list) let the drop propagate up to here.
     def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasUrls() or event.mimeData().hasText():
             event.acceptProposedAction()
 
@@ -422,7 +365,11 @@ class AXPlayerWindow(QWidget):
         if mime.hasUrls():
             uris = [u.toString() for u in mime.urls()]
         elif mime.hasText():
-            uris = [line.strip() for line in mime.text().splitlines() if line.strip() and not line.strip().startswith("#")]
+            uris = [
+                line.strip()
+                for line in mime.text().splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
         else:
             uris = []
         if uris:
@@ -515,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     # A windowed (console=False) build has nowhere for an uncaught exception
     # to go -- Qt just prints to a stderr nobody can see and the app either
     # limps on or vanishes. Route it to the same debug.log everything else
-    # in this diagnostic pass uses.
+    # uses.
     def _log_uncaught(exc_type, exc_value, exc_tb):
         debug_log.log(
             "UNCAUGHT: " + "".join(traceback.format_exception(exc_type, exc_value, exc_tb))

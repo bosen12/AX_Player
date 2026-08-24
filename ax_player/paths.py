@@ -119,7 +119,3 @@ def resume_db_path() -> Path:
 @lru_cache(maxsize=1)
 def icon_path() -> Path:
     return _package_dir() / "resources" / "icon.ico"
-
-
-def web_dir() -> Path:
-    return _package_dir() / "web"

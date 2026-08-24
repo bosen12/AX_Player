@@ -1,7 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 datas = [
-    ("ax_player/web", "ax_player/web"),
     ("ax_player/resources", "ax_player/resources"),
     # Only the small, stable mpv-runtime pieces -- NOT mpv.exe/libmpv-2.dll
     # (large, change often; fetched into a writable per-user folder on
@@ -18,16 +17,31 @@ datas = [
 hiddenimports = [
     "ax_player",
     "ax_player.app",
-    "ax_player.bridge",
+    "ax_player.debug_log",
     "ax_player.paths",
     "ax_player.player_widget",
     "ax_player.resume",
     "ax_player.thumbnails",
+    "ax_player.ui",
     "ax_player.mpv_fetch",
     "mpv",
+]
+
+# The UI is plain QtWidgets now. Nothing pulls QtWebEngine in any more, but
+# PyInstaller's PySide6 hook still ships it (and its ~150MB Chromium payload,
+# plus QtQuick/QtQml/QtPositioning behind it) whenever the module is present
+# in the environment -- so exclude it explicitly.
+excludes = [
+    "pytest",
+    "unittest",
     "PySide6.QtWebEngineWidgets",
     "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineQuick",
     "PySide6.QtWebChannel",
+    "PySide6.QtQuick",
+    "PySide6.QtQuickWidgets",
+    "PySide6.QtQml",
+    "PySide6.QtPositioning",
 ]
 
 a = Analysis(
@@ -39,7 +53,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["pytest", "unittest"],
+    excludes=excludes,
     noarchive=False,
 )
 pyz = PYZ(a.pure)
