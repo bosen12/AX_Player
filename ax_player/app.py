@@ -9,15 +9,7 @@ from PySide6.QtGui import QIcon, QRegion
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QMenu,
-    QMessageBox,
-    QProgressDialog,
-    QSystemTrayIcon,
-    QWidget,
-)
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressDialog, QWidget
 
 from ax_player import resume
 from ax_player.bridge import Bridge, to_url
@@ -168,19 +160,6 @@ class AXPlayerWindow(QWidget):
         self._stage_rect = QRect()
         self.setAcceptDrops(True)
 
-        self._quitting = False
-        self._tray: QSystemTrayIcon | None = None
-        if QSystemTrayIcon.isSystemTrayAvailable():
-            self._tray = QSystemTrayIcon(self.windowIcon(), self)
-            self._tray.setToolTip("AX Player")
-            menu = QMenu()
-            menu.addAction("顯示 AX Player", self._restore_from_tray)
-            menu.addSeparator()
-            menu.addAction("結束", self._quit_from_tray)
-            self._tray.setContextMenu(menu)
-            self._tray.activated.connect(self._on_tray_activated)
-            self._tray.show()
-
     # -- layout --------------------------------------------------------
     def resizeEvent(self, event) -> None:  # noqa: N802
         self.web.setGeometry(self.rect())
@@ -263,21 +242,20 @@ class AXPlayerWindow(QWidget):
             self.showFullScreen()
         elif not on and self.isFullScreen():
             self.showNormal()
+        if on:
+            # Set the stage synchronously to the target screen's own
+            # geometry instead of relying on resizeEvent firing with
+            # self.rect() already reflecting the new fullscreen size --
+            # showFullScreen()'s actual native resize can land a frame or
+            # two after this call returns, and until it does, the mpv
+            # widget stayed sized for the old windowed stage while the web
+            # view (already covering the full screen) painted blank around
+            # it. The screen's geometry is known immediately, no waiting.
+            screen = self.screen()
+            if screen is not None:
+                geo = screen.geometry()
+                self.set_stage_geometry(0, 0, geo.width(), geo.height())
         self.bridge.fullscreenChanged.emit(on)
-
-    # -- system tray ---------------------------------------------------------
-    def _restore_from_tray(self) -> None:
-        self.showNormal()
-        self.activateWindow()
-        self.raise_()
-
-    def _quit_from_tray(self) -> None:
-        self._quitting = True
-        self.close()
-
-    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self._restore_from_tray()
 
     # -- library -----------------------------------------------------------
     def pick_folder(self) -> None:
@@ -389,10 +367,6 @@ class AXPlayerWindow(QWidget):
             self.play(videos[0])
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._tray is not None and self._tray.isVisible() and not self._quitting:
-            event.ignore()
-            self.hide()
-            return
         self.player.shutdown()
         super().closeEvent(event)
 
