@@ -325,18 +325,33 @@ class PlayerWidget(QWidget):
         event.accept()
 
     # -- drag & drop ---------------------------------------------------------
+    # A real dragged hyperlink (e.g. from a browser) sets text/uri-list,
+    # which QMimeData.hasUrls()/.urls() reads. Dragging plain URL *text*
+    # (selected text, not a link object -- from a chat window, an address
+    # bar, etc.) usually only sets text/plain, which hasUrls() ignores
+    # entirely -- the drag would be silently rejected with no feedback at
+    # all. Falls back to parsing plain text as one URL per line, matching
+    # what the web-page drop handler (app.js) already does for drops
+    # landing outside this widget's area.
+    def _dropped_uris(self, mime) -> list[str]:
+        if mime.hasUrls():
+            return [u.toString() for u in mime.urls()]
+        if mime.hasText():
+            return [line.strip() for line in mime.text().splitlines() if line.strip() and not line.strip().startswith("#")]
+        return []
+
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
             event.acceptProposedAction()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        urls = event.mimeData().urls()
-        if urls:
-            self.files_dropped.emit([u.toString() for u in urls])
+        uris = self._dropped_uris(event.mimeData())
+        if uris:
+            self.files_dropped.emit(uris)
             event.acceptProposedAction()
 
     def shutdown(self) -> None:

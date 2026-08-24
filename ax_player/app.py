@@ -397,14 +397,24 @@ class AXPlayerWindow(QWidget):
             self.bridge.thumbnailReady.emit(path, url)
 
     # -- drag & drop ---------------------------------------------------------
+    # See PlayerWidget's identical comment: a real dragged hyperlink sets
+    # text/uri-list (hasUrls()), but dragged plain URL text usually only
+    # sets text/plain, which hasUrls() ignores -- fall back to it, one URL
+    # per line, same as the web-page drop handler (app.js) already does.
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        urls = event.mimeData().urls()
-        if urls:
-            self.open_dropped([u.toString() for u in urls])
+        mime = event.mimeData()
+        if mime.hasUrls():
+            uris = [u.toString() for u in mime.urls()]
+        elif mime.hasText():
+            uris = [line.strip() for line in mime.text().splitlines() if line.strip() and not line.strip().startswith("#")]
+        else:
+            uris = []
+        if uris:
+            self.open_dropped(uris)
             event.acceptProposedAction()
 
     def open_dropped(self, uris: list[str]) -> None:
