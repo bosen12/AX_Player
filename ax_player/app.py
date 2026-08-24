@@ -175,6 +175,14 @@ class AXPlayerWindow(QWidget):
         # tiny 100x30 corner, indistinguishable from nothing happening at
         # all. reportStageGeometry() still corrects/confirms this once it
         # fires; this only covers the gap before it does.
+        #
+        # _apply_stage_mask() computes the mask from self.web.rect(), which
+        # is still Qt's default small size at this point in __init__ --
+        # self.web only gets sized to the full window in resizeEvent, which
+        # hasn't fired yet (the window isn't shown yet). Size it here first,
+        # or the mask ends up computed against that stale tiny rect and the
+        # sidebar/titlebar don't render at all until the first real resize.
+        self.web.setGeometry(self.rect())
         self._stage_rect = QRect(
             SIDEBAR_W, TITLEBAR_H, max(1, self.width() - SIDEBAR_W), max(1, self.height() - TITLEBAR_H)
         )
