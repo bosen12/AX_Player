@@ -209,6 +209,43 @@ class PlayerWidget(QWidget):
         if path and pos is not None and duration:
             self.progress_changed.emit(str(path), float(pos), float(duration))
 
+    def _prop(self, name: str):
+        """One mpv property, or None.
+
+        Named with underscores: python-mpv's attribute access maps those to
+        mpv's hyphenated property names. Reading an unset property raises
+        rather than returning None, and between files most of these are unset.
+        """
+        try:
+            return getattr(self._mpv, name)
+        except Exception:
+            return None
+
+    def diagnostics(self) -> dict:
+        """A snapshot of what mpv is actually doing right now.
+
+        Deliberately not a reimplementation of mpv's own stats.lua (Shift+I),
+        which already shows codec/resolution/cache well. This exists for the
+        parts it can't answer: whether the interpolation filter is keeping up
+        with the frame rate it is supposed to be producing.
+        """
+        vf = str(self._prop("vf") or "")
+        return {
+            "playing": bool(self._prop("path")),
+            "width": self._prop("width"),
+            "height": self._prop("height"),
+            "codec": self._prop("video_format"),
+            "hwdec": self._prop("hwdec_current"),
+            "source_fps": self._prop("container_fps"),
+            "output_fps": self._prop("estimated_vf_fps"),
+            "display_fps": self._prop("display_fps"),
+            "dropped": self._prop("frame_drop_count"),
+            "delayed": self._prop("vo_delayed_frame_count"),
+            "avsync": self._prop("avsync"),
+            "cache": self._prop("demuxer_cache_duration"),
+            "interpolating": "@fluid" in vf or "fluid_rife" in vf,
+        }
+
     def _mpv_cmd(self, *args: str) -> None:
         try:
             self._mpv.command(*args)

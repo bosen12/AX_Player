@@ -5,7 +5,18 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, QObject, QRunnable, QThread, QThreadPool, QUrl, Qt, Signal, Slot
+from PySide6.QtCore import (
+    QEventLoop,
+    QObject,
+    QRunnable,
+    QThread,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Qt,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ax_player import debug_log, resume, settings, ui
+from ax_player import debug_log, diagnostics, resume, settings, ui
 from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file
 from ax_player.player_widget import PlayerWidget
 from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
@@ -180,7 +191,19 @@ class AXPlayerWindow(QWidget):
         self.titlebar.maximize_clicked.connect(self.toggle_maximize)
         self.titlebar.close_clicked.connect(self.close)
         self.titlebar.fluid_clicked.connect(self.toggle_fluid_motion)
+        self.titlebar.stats_clicked.connect(self.toggle_diagnostics)
         self.titlebar.drag_started.connect(self.start_window_drag)
+
+        # mpv's own numbers are free to read, so they refresh every second.
+        # nvidia-smi costs ~160ms, so it runs in the pool and only while the
+        # panel is actually visible.
+        self._gpu_signals = diagnostics.GpuSignals()
+        self._gpu_signals.ready.connect(self._on_gpu_sample)
+        self._gpu_sample: dict = {}
+        self._gpu_pending = False
+        self._diag_timer = QTimer(self)
+        self._diag_timer.setInterval(1000)
+        self._diag_timer.timeout.connect(self._refresh_diagnostics)
 
         self.sidebar = ui.Sidebar(self)
         self.sidebar.open_folder_clicked.connect(self.pick_folder)
@@ -411,6 +434,29 @@ class AXPlayerWindow(QWidget):
 
     def toggle_fluid_motion(self) -> None:
         self.player.toggle_fluid_motion()
+
+    def toggle_diagnostics(self) -> None:
+        panel = self.sidebar.diagnostics
+        showing = not panel.isVisible()
+        panel.setVisible(showing)
+        self.titlebar.set_stats_active(showing)
+        if showing:
+            self._refresh_diagnostics()
+            self._diag_timer.start()
+        else:
+            self._diag_timer.stop()
+
+    def _refresh_diagnostics(self) -> None:
+        self.sidebar.diagnostics.update_data(self.player.diagnostics(), self._gpu_sample)
+        # One nvidia-smi in flight at a time: at ~160ms a piece they would
+        # otherwise pile up behind a stalled call.
+        if not self._gpu_pending:
+            self._gpu_pending = True
+            self._thumb_pool.start(diagnostics.GpuQueryJob(self._gpu_signals))
+
+    def _on_gpu_sample(self, sample: dict) -> None:
+        self._gpu_pending = False
+        self._gpu_sample = sample
 
     def _on_path_changed(self, path: str) -> None:
         self._current = Path(path)

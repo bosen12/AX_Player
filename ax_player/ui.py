@@ -137,6 +137,10 @@ class _ChromeButton(QAbstractButton):
         elif self._kind == "close":
             painter.drawLine(QPointF(cx - 4, cy - 4), QPointF(cx + 4, cy + 4))
             painter.drawLine(QPointF(cx + 4, cy - 4), QPointF(cx - 4, cy + 4))
+        elif self._kind == "stats":
+            for i, height in enumerate((4.5, 8.0, 6.0)):
+                x = cx - 5 + i * 5
+                painter.drawLine(QPointF(x, cy + 4), QPointF(x, cy + 4 - height))
         elif self._kind == "fluid":
             painter.save()
             painter.translate(cx - 8, cy - 8)
@@ -156,6 +160,7 @@ class TitleBar(QWidget):
     maximize_clicked = Signal()
     close_clicked = Signal()
     fluid_clicked = Signal()
+    stats_clicked = Signal()
     drag_started = Signal()
 
     def __init__(self, parent: QWidget | None = None):
@@ -192,9 +197,14 @@ class TitleBar(QWidget):
         self._fluid.setToolTip("切換 Fluid Motion 補幀")
         self._fluid.clicked.connect(self.fluid_clicked)
 
+        self._stats = _ChromeButton("stats", self, width=38)
+        self._stats.setToolTip("播放診斷")
+        self._stats.clicked.connect(self.stats_clicked)
+
         layout.addWidget(bulb)
         layout.addWidget(wordmark)
         layout.addWidget(self._title, 1)
+        layout.addWidget(self._stats)
         layout.addWidget(self._fluid)
 
         for kind, signal in (
@@ -212,6 +222,9 @@ class TitleBar(QWidget):
 
     def set_fluid_active(self, on: bool) -> None:
         self._fluid.set_active(on)
+
+    def set_stats_active(self, on: bool) -> None:
+        self._stats.set_active(on)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -424,6 +437,96 @@ def _draw_clamped_text(painter: QPainter, rect: QRectF, text: str, color: QColor
         y += line_height
 
 
+def _fmt(value, suffix: str = "", digits: int = 0) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:.{digits}f}{suffix}"
+    return f"{value}{suffix}"
+
+
+class DiagnosticsPanel(QWidget):
+    """What mpv and the GPU are actually doing, in the sidebar.
+
+    Not an overlay on the video: mpv renders into a native child window, and
+    a plain Qt widget in front of that is drawn into the top-level's backing
+    store *behind* it, so it would simply be invisible.
+
+    Only covers what mpv's own stats.lua (Shift+I) can't -- GPU telemetry,
+    and a verdict rather than raw numbers to interpret.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("diagnostics")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+
+        self._verdict = QLabel("未播放", self)
+        self._verdict.setObjectName("verdict")
+        self._verdict.setWordWrap(True)
+        self._body = QLabel("", self)
+        self._body.setObjectName("diagBody")
+        self._body.setWordWrap(True)
+        self._body.setTextFormat(Qt.TextFormat.PlainText)
+
+        layout.addWidget(self._verdict)
+        layout.addWidget(self._body)
+
+    def update_data(self, stats: dict, gpu: dict) -> None:
+        verdict, ok = self._verdict_for(stats)
+        self._verdict.setText(verdict)
+        self._verdict.setStyleSheet(f"color: {ACCENT if ok else DANGER};")
+
+        size = "—"
+        if stats.get("width") and stats.get("height"):
+            size = f"{stats['width']}×{stats['height']}"
+        lines = [
+            f"影片   {size}  {stats.get('codec') or '—'}",
+            f"解碼   {stats.get('hwdec') or '—'}",
+            f"幀率   來源 {_fmt(stats.get('source_fps'), digits=2)}"
+            f"  →  輸出 {_fmt(stats.get('output_fps'), digits=2)}",
+            f"掉幀   解碼 {_fmt(stats.get('dropped'))}  顯示 {_fmt(stats.get('delayed'))}",
+            f"A/V    {_fmt(stats.get('avsync'), 's', 3)}",
+        ]
+        cache = stats.get("cache")
+        if cache is not None:
+            lines.append(f"緩衝   {_fmt(cache, 's', 1)}")
+        if gpu:
+            used, total = gpu.get("vram_used"), gpu.get("vram_total")
+            vram = f"{used:.0f}/{total:.0f} MB" if used and total else "—"
+            lines.append(
+                f"GPU    {_fmt(gpu.get('gpu_util'), '%')}"
+                f"  解碼 {_fmt(gpu.get('decoder_util'), '%')}"
+                f"  {_fmt(gpu.get('temperature'), '°C')}"
+            )
+            lines.append(f"VRAM   {vram}")
+        self._body.setText("\n".join(lines))
+
+    @staticmethod
+    def _verdict_for(stats: dict) -> tuple[str, bool]:
+        if not stats.get("playing"):
+            return "未播放", True
+        source = stats.get("source_fps") or 0
+        output = stats.get("output_fps") or 0
+        if not source or not output:
+            return "播放中（尚未取得幀率）", True
+        ratio = output / source
+        if stats.get("interpolating"):
+            # Fluid Motion's multiplier isn't exposed here, but anything at or
+            # above ~1.8x means it is producing roughly the doubled rate it
+            # normally targets; well below that means it can't keep up.
+            if ratio >= 1.8:
+                return f"補幀運作中 · {ratio:.1f}× ({output:.1f} fps)", True
+            return f"補幀落後 · 只有 {ratio:.1f}× ({output:.1f} fps)", False
+        if ratio >= 0.95:
+            return f"正常播放 · {output:.1f} fps", True
+        return f"輸出幀率偏低 · {output:.1f} / {source:.1f} fps", False
+
+
 class Sidebar(QWidget):
     """Library browser: open actions, search, and the folder's video list."""
 
@@ -562,6 +665,10 @@ class Sidebar(QWidget):
         self._empty.setWordWrap(True)
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._empty, 1)
+
+        self.diagnostics = DiagnosticsPanel(self)
+        self.diagnostics.hide()
+        layout.addWidget(self.diagnostics)
 
     def restore_state(self, *, recursive: bool, sort_mode: str, unwatched_only: bool) -> None:
         """Apply persisted state without re-emitting the signals that would
@@ -753,6 +860,18 @@ QComboBox#sort QAbstractItemView {{
     outline: none;
 }}
 QLabel#empty {{ color: {MUTED}; font-size: 12px; padding: 0 8px; }}
+
+QWidget#diagnostics {{
+    background: {PAPER_3};
+    border: 1px solid {RULE};
+    border-radius: 6px;
+}}
+QLabel#verdict {{ color: {ACCENT}; font-size: 11px; font-weight: 600; }}
+QLabel#diagBody {{
+    color: {MUTED};
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 10px;
+}}
 
 QLineEdit#search {{
     margin: 0 8px;
