@@ -159,7 +159,11 @@ Anime4K **預設關閉**，因為它是動畫放大器，套在真人影片上�
 - **縮圖產生變慢或系統打嗝**：縮圖是靠背景執行緒個別啟動 `mpv.exe` 子行程硬解抓幀，數量跟 CPU 核心數綁定並設有上限。開資料夾時每部影片會產生一張 hover 用的 3×3 預覽格，過去那要啟動九次 mpv（一格一次），因為成本幾乎全在啟動行程而非解碼——單幀 0.48 秒、九幀 4.54 秒。現在改用 mpv 的 `--sstep` 在同一個行程內走完九個時間點，每張 1.04 秒，二十部影片的資料夾從約兩百個子行程降到二十個。若同時有其他吃 GPU 解碼資源的程式在跑（例如 Fluid Motion 正在編譯補幀引擎），仍可能撞在一起，只是窗口小了很多
 - **`thumbfast: cannot create mpv subprocess`**：thumbfast 抓 hover 縮圖用的獨立 mpv 子行程**建立失敗**——mpv 記在 `debug.log` 裡的原文是 `Subprocess failed: init`，也就是行程根本沒啟動，跟解碼或 GPU 無關（實測三十個 mpv 同時抓幀，這種啟動仍然零失敗）。在 Windows 上這通常只發生在該次工作階段**第一次**啟動 `mpv.exe` 時，之後就正常，所以縮圖預覽實際上是會出現的。
 
-  thumbfast 只在「從來沒有成功過」時才顯示這個訊息（它自己的 `spawn_working` 旗標，任何一次成功就永久關掉），因此 `mpv-runtime/script-opts/thumbfast.conf` 預設帶 `spawn_first=yes`：把第一次啟動提前到載入檔案時，先取得一次成功，順便讓 hover 預覽一叫就有。如果你用的是自己的 `C:\mpv` 設定而看到這個訊息，在該目錄的 `script-opts/thumbfast.conf` 加上 `spawn_first=yes` 即可
+  既然失敗是暫時的，[`mpv-runtime/scripts/thumbfast.lua`](mpv-runtime/scripts/thumbfast.lua) 帶了一小段修改：被拒絕時**靜默重試兩次**（間隔 0.6 秒），三次都被拒才顯示訊息。判斷依據是 mpv 回報的 `error_string == "init"`（行程沒啟動），所以「有啟動但立刻異常結束」這種真正的設定問題仍然會立刻報出來，不會被藏起來。
+
+  如果你用的是自己的 `C:\mpv` 而非內建 runtime，那份 `scripts/thumbfast.lua` 不含這個修改，訊息還是會出現——把 `mpv-runtime/scripts/thumbfast.lua` 複製過去即可。
+
+  > 曾經試過改用 thumbfast 的 `spawn_first=yes`（把第一次啟動提前到載入檔案時，搶在失敗前先成功一次）。**那個做法會讓情況變糟**：從檔案總管雙擊影片啟動時，載入時刻正好是程式冷啟動最忙的時候，反而更容易被拒。已經改回預設
 - **拖曳只能丟在側邊欄才有反應**：不會，影片區域跟側邊欄都支援拖放；如果真的沒反應，請確認拖曳的是真實檔案（不是瀏覽器分頁之類的虛擬項目）
 
 ## 專案結構
