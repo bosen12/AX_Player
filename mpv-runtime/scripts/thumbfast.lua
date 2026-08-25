@@ -545,6 +545,25 @@ local function spawn(time)
                     return
                 end
                 options.tone_mapping = "no"
+                -- AX Player patch: the "cannot create mpv subprocess"
+                -- banner is gone -- mp.msg.error below is the only report
+                -- left.
+                --
+                -- Measured with an IAT hook on the CreateProcessW that
+                -- libmpv itself calls: a refused spawn is a real refusal
+                -- (the call returns FALSE, GetLastError 87 /
+                -- ERROR_INVALID_PARAMETER, and no child process exists),
+                -- not a callback misreading a success. But it is
+                -- transient: the very next attempt goes through, and
+                -- thumbfast re-spawns on the following hover anyway, so
+                -- hover previews work either way. It only happens in a
+                -- console-less (GUI) host like AX Player; the identical
+                -- spawn from a process that has a console never fails.
+                --
+                -- So the banner reported something real and yet useless
+                -- to the user: five seconds of red text over the video
+                -- for a condition that has already fixed itself by the
+                -- time it can be read.
                 mp.msg.error("mpv subprocess create failed")
                 if not spawn_working then -- notify users of required configuration
                     if options.mpv_path == "mpv" then
@@ -557,18 +576,18 @@ local function spawn(time)
                                     force_disabled = true
                                     info(real_w or effective_w, real_h or effective_h)
                                 end
-                                mp.commandv("show-text", "thumbfast: ERROR! cannot create mpv subprocess", 5000)
+                                -- AX Player patch: no OSD banner here (see note above).
                                 mp.commandv("script-message-to", "implay", "show-message", "thumbfast initial setup", "Set mpv_path=PATH_TO_ImPlay in thumbfast config:\n" .. string.gsub(mp.command_native({"expand-path", "~~/script-opts/thumbfast.conf"}), "[/\\]", path_separator).."\nand restart ImPlay")
                             end
                         else
-                            mp.commandv("show-text", "thumbfast: ERROR! cannot create mpv subprocess", 5000)
+                            -- AX Player patch: no OSD banner here (see note above).
                             if os_name == "windows" and frontend_path == nil then
                                 mp.commandv("script-message-to", "mpvnet", "show-text", "thumbfast: ERROR! install standalone mpv, see README", 5000, 20)
                                 mp.commandv("script-message", "mpv.net", "show-text", "thumbfast: ERROR! install standalone mpv, see README", 5000, 20)
                             end
                         end
                     else
-                        mp.commandv("show-text", "thumbfast: ERROR! cannot create mpv subprocess", 5000)
+                        -- AX Player patch: no OSD banner here (see note above).
                         -- found ImPlay but not defined in config
                         mp.commandv("script-message-to", "implay", "show-message", "thumbfast", "Set mpv_path=PATH_TO_ImPlay in thumbfast config:\n" .. string.gsub(mp.command_native({"expand-path", "~~/script-opts/thumbfast.conf"}), "[/\\]", path_separator).."\nand restart ImPlay")
                     end
