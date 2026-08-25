@@ -136,6 +136,27 @@ def _grab_frame_at(video: Path, seconds: float, dest: Path) -> Path | None:
             pass
 
 
+def _settled_frames(
+    tmp_dir: Path, previous: dict[Path, int]
+) -> tuple[list[Path], dict[Path, int]]:
+    """Frames whose size has stopped changing, plus this pass's sizes.
+
+    A non-empty file that is the same size as it was one poll ago is done
+    being written; anything else is still in flight.
+    """
+    sizes: dict[Path, int] = {}
+    settled: list[Path] = []
+    for frame in sorted(tmp_dir.glob("*.jpg")):
+        try:
+            size = frame.stat().st_size
+        except OSError:
+            continue
+        sizes[frame] = size
+        if size > 0 and previous.get(frame) == size:
+            settled.append(frame)
+    return settled, sizes
+
+
 def _grab_evenly_spaced(
     video: Path, start: float, step: float, count: int, tmp_dir: Path
 ) -> list[Path]:
@@ -149,6 +170,12 @@ def _grab_evenly_spaced(
     mpv does not exit once the frames are written, so this waits for the files
     to appear and then ends it rather than blocking on the process. Returns
     the frames it got, in time order; a short read is the caller's to handle.
+
+    "Appear" is not "finished": a file shows up in the directory the moment it
+    is created, so the newest one is usually still being written. Only frames
+    whose size held steady across two polls are counted, otherwise the last
+    cell of the sheet is a truncated JPEG that loads as a null QImage and gets
+    silently dropped -- and the eight-frame sheet is then cached for good.
     """
     exe = mpv_exe()
     if exe is None:
@@ -181,15 +208,23 @@ def _grab_evenly_spaced(
             stderr=subprocess.DEVNULL,
         )
         deadline = time.monotonic() + GRAB_TIMEOUT
+        sizes: dict[Path, int] = {}
         while time.monotonic() < deadline:
-            produced = sorted(tmp_dir.glob("*.jpg"))
-            if len(produced) >= count:
-                return produced[:count]
+            settled, sizes = _settled_frames(tmp_dir, sizes)
+            if len(settled) >= count:
+                return settled[:count]
             if proc.poll() is not None:
                 # Ended early: whatever it managed to write is all there is.
-                return sorted(tmp_dir.glob("*.jpg"))[:count]
+                # Nothing can still be growing once the writer has exited, so
+                # the two-pass settling rule is not needed (and would wrongly
+                # drop a frame finished between the last poll and the exit).
+                return [
+                    frame
+                    for frame in sorted(tmp_dir.glob("*.jpg"))
+                    if frame.stat().st_size > 0
+                ][:count]
             time.sleep(0.02)
-        return sorted(tmp_dir.glob("*.jpg"))[:count]
+        return _settled_frames(tmp_dir, sizes)[0][:count]
     except (subprocess.SubprocessError, OSError):
         return []
     finally:

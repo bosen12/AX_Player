@@ -45,6 +45,9 @@ from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
 
 RESIZE_MARGIN = 6
 
+# How many of a folder's contact sheets to generate before being asked.
+EAGER_SHEET_LIMIT = 12
+
 
 class _JobSignals(QObject):
     thumb_done = Signal(str, str)  # video path, thumbnail image path ("" on failure)
@@ -453,8 +456,14 @@ class AXPlayerWindow(QWidget):
         if self._folder is None or video.parent != self._folder:
             self.open_folder(video.parent, select=video)
             return
-        if video in self._playlist:
-            self.player.play_index(self._playlist.index(video))
+        # By path, not by sidebar position: after a re-sort during playback the
+        # two orders differ on purpose (see _on_folder_scanned), and an index
+        # taken from here would land on a different file in mpv's playlist.
+        # A miss means mpv is holding a playlist that predates this file, so
+        # reload it -- pointed at the file that was asked for.
+        if not self.player.play_path(video):
+            self.open_folder(self._folder, select=video)
+            return
         self.player.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def play_url(self, url: str) -> None:
@@ -467,10 +476,7 @@ class AXPlayerWindow(QWidget):
         remove_set = {Path(p) for p in paths}
         if not remove_set or not self._playlist:
             return
-        for index in sorted(
-            (i for i, p in enumerate(self._playlist) if p in remove_set), reverse=True
-        ):
-            self.player.remove_index(index)
+        self.player.remove_paths(remove_set)
         self._playlist = [p for p in self._playlist if p not in remove_set]
         folder_name = (self._folder.name or str(self._folder)) if self._folder else ""
         self.sidebar.set_items(folder_name, self._playlist_items())
@@ -529,14 +535,21 @@ class AXPlayerWindow(QWidget):
         self._thumb_pool.start(_SheetJob(video, self._sheet_signals), priority)
 
     def _queue_all_contact_sheets(self) -> None:
-        # Pre-generate every row's contact sheet up front instead of waiting
-        # for a hover -- request_contact_sheet's cache-hit and in-flight
-        # checks make this a no-op for anything already done or queued, and
-        # jobs beyond _thumb_pool's cap just sit in the pool's own queue
-        # rather than spawning unbounded mpv subprocesses at once. Queued
-        # below the default priority so a live hover or a thumbnail paint
-        # request still jumps the line ahead of this background sweep.
-        for video in self._playlist:
+        # Pre-generate the top of the list up front instead of waiting for a
+        # hover -- request_contact_sheet's cache-hit and in-flight checks make
+        # this a no-op for anything already done or queued, and jobs beyond
+        # _thumb_pool's cap just sit in the pool's own queue rather than
+        # spawning unbounded mpv subprocesses at once. Queued below the
+        # default priority so a live hover or a thumbnail paint request still
+        # jumps the line ahead of this background sweep.
+        #
+        # Capped rather than folder-wide: an uncached sheet costs two mpv
+        # subprocesses (a duration probe and the frame grab), so sweeping a
+        # 500-file folder queued a thousand of them at the exact moment
+        # playback and thumbnail generation were also starting -- for previews
+        # of rows nobody had hovered. Everything past the cap is generated on
+        # hover, which the 350ms hover-intent delay already covers.
+        for video in self._playlist[:EAGER_SHEET_LIMIT]:
             self.request_contact_sheet(str(video), priority=-1)
 
     def _on_sheet_done(self, path: str, image_path: str) -> None:

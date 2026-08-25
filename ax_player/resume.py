@@ -9,6 +9,7 @@ module doesn't duplicate that. It just gives the UI something to draw.
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 from ax_player.paths import resume_db_path
@@ -53,7 +54,18 @@ def save_progress(video: str, pos: float, duration: float) -> None:
         # Watched: report 0 progress so a finished episode doesn't sit at
         # "resume from 23:58" in the UI forever.
         data[video] = {"pos": 0.0 if watched else pos, "duration": duration, "watched": watched}
+        # Written via a temp file and swapped in with os.replace: this rewrites
+        # the whole database, and it runs on every 5-second progress poll, so
+        # an in-place write is a standing chance for a crash or power loss to
+        # leave a truncated file -- which _load()'s ValueError guard then reads
+        # as "no data at all", wiping every video's progress and watched badge.
+        path = resume_db_path()
+        tmp = path.with_name(path.name + ".tmp")
         try:
-            resume_db_path().write_text(json.dumps(data), encoding="utf-8")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            os.replace(tmp, path)
         except OSError:
-            pass
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass

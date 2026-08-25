@@ -23,12 +23,19 @@ import mpv  # noqa: E402  (deferred: needs PATH set up above)
 # (see mpv-player/mpv#6762). Without forwarding events ourselves, mpv never
 # learns the cursor moved, so uosc's proximity-based timeline/controls can
 # never fade in and on-video clicks/drags never reach it either.
+
+# Names are mpv's current ones (MBTN_*), not the legacy MOUSE_BTN* aliases.
+# The aliases are not a straight renaming: MOUSE_BTN0/1/2 still resolve to
+# MBTN_LEFT/MID/RIGHT, but MOUSE_BTN5 resolves to no key at all and
+# MOUSE_BTN6 resolves to the *horizontal wheel* -- so a back/forward button
+# press used to reach mpv as WHEEL_LEFT/WHEEL_RIGHT, firing whatever those
+# are bound to and never the binding the user actually wrote.
 _MOUSE_BUTTONS = {
-    Qt.MouseButton.LeftButton: "MOUSE_BTN0",
-    Qt.MouseButton.MiddleButton: "MOUSE_BTN1",
-    Qt.MouseButton.RightButton: "MOUSE_BTN2",
-    Qt.MouseButton.BackButton: "MOUSE_BTN5",
-    Qt.MouseButton.ForwardButton: "MOUSE_BTN6",
+    Qt.MouseButton.LeftButton: "MBTN_LEFT",
+    Qt.MouseButton.MiddleButton: "MBTN_MID",
+    Qt.MouseButton.RightButton: "MBTN_RIGHT",
+    Qt.MouseButton.BackButton: "MBTN_BACK",
+    Qt.MouseButton.ForwardButton: "MBTN_FORWARD",
 }
 
 # Same WS_DISABLED story applies to the keyboard: mpv never sees a single
@@ -172,6 +179,11 @@ class PlayerWidget(QWidget):
             loglevel="warn",
         )
         self._list_file: Path | None = None
+        # The order mpv's own playlist is in. It is not always self._playlist
+        # in app.py: a re-sort while something is playing deliberately leaves
+        # mpv alone (reloading it would restart playback), and an index taken
+        # from the re-sorted sidebar then addresses a different file here.
+        self._loaded: list[Path] = []
 
         self._mpv.observe_property("path", self._on_path)
         self._mpv.observe_property("media-title", self._on_title)
@@ -285,6 +297,7 @@ class PlayerWidget(QWidget):
                 fh.write(f"{video}\n")
         old = self._list_file
         self._list_file = Path(handle.name)
+        self._loaded = list(videos)
         try:
             self._mpv.playlist_start = start_index
             self._mpv.command("loadlist", str(self._list_file), "replace")
@@ -293,11 +306,21 @@ class PlayerWidget(QWidget):
         if old is not None:
             old.unlink(missing_ok=True)
 
-    def play_index(self, index: int) -> None:
+    def play_path(self, video: Path) -> bool:
+        """Play a file by path rather than by sidebar position.
+
+        False means mpv's playlist does not hold it, and the caller has to
+        load a playlist that does.
+        """
+        try:
+            index = self._loaded.index(video)
+        except ValueError:
+            return False
         try:
             self._mpv.command("playlist-play-index", str(index))
         except Exception:
-            pass
+            return False
+        return True
 
     def play_url(self, url: str) -> None:
         # Not part of the folder playlist -- yt-dlp (bundled in the mpv
@@ -317,8 +340,17 @@ class PlayerWidget(QWidget):
         except Exception:
             debug_log.log_exc("play_url: loadfile command FAILED")
 
-    def remove_index(self, index: int) -> None:
-        self._mpv_cmd("playlist-remove", str(index))
+    def remove_paths(self, videos: set[Path]) -> None:
+        """Drop these files from mpv's playlist, addressed by path.
+
+        Descending order so each removal cannot shift the index of one that
+        has not been removed yet.
+        """
+        for index in sorted(
+            (i for i, video in enumerate(self._loaded) if video in videos), reverse=True
+        ):
+            self._mpv_cmd("playlist-remove", str(index))
+        self._loaded = [video for video in self._loaded if video not in videos]
 
     def toggle_fluid_motion(self) -> None:
         # Reuses the F3 binding zz-fluid-ipc.lua already registers, instead

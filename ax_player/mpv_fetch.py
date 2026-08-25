@@ -42,10 +42,22 @@ def _latest_download_url(title_prefix: str) -> str:
 
 
 def _download(url: str, dest: Path, on_progress: Callable[[str], None] | None) -> None:
+    """Fetch to a .part file and rename only once it is complete.
+
+    fetch_binaries skips each file when it merely exists, so a download that
+    died halfway used to leave a truncated binary that looked finished for
+    good: a half-written yt-dlp.exe is never re-fetched, and every URL then
+    fails inside mpv's ytdl_hook with nothing to say why.
+    """
     if on_progress:
         on_progress(f"下載中：{dest.name}")
-    with urllib.request.urlopen(url, timeout=300) as resp, open(dest, "wb") as fh:
-        shutil.copyfileobj(resp, fh)
+    partial = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=300) as resp, open(partial, "wb") as fh:
+            shutil.copyfileobj(resp, fh)
+        partial.replace(dest)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def _extract_member(archive: Path, member: str, dest_dir: Path) -> None:

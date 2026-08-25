@@ -797,6 +797,12 @@ class Sidebar(QWidget):
         has_items = bool(items)
         self._list.setVisible(has_items)
         self._empty.setVisible(not has_items)
+        # The rows are new; the filter state is not. Without this the
+        # "只看未看完" checkbox stayed ticked while every watched row was
+        # shown -- on every folder change, and on startup, where
+        # restore_state() ticks it with signals blocked so nothing else ever
+        # applies it.
+        self._apply_filter()
         self._update_selection_bar()
         if self._playing:
             self.set_playing(self._playing)
