@@ -135,6 +135,20 @@ class PlayerWidget(QWidget):
             wid=str(int(self.winId())),
             config=True,
             config_dir=str(default_mpv_root()),
+            # Announce this instance on the pipe name Fluid Motion looks for
+            # first. Without it an embedded libmpv host is invisible to FM:
+            # it enumerates OS processes for mpv.exe (this one is python.exe
+            # or AXPlayer.exe) and otherwise falls back to scanning named
+            # pipes -- and mpv only opens a pipe at all when something sets
+            # input-ipc-server.
+            #
+            # Setting it here rather than leaving it to FM's own
+            # zz-fluid-ipc.lua is what makes this reliable: mpv binds the IPC
+            # listener exactly once, so whichever Lua script claims it first
+            # wins, and a config dir that also ships mpvSockets.lua (loaded
+            # before "zz-" alphabetically) silently takes the name instead.
+            # An init option is set before any script runs, so it always wins.
+            input_ipc_server=f"fluid-mpv-{os.getpid()}",
             input_default_bindings=True,
             input_vo_keyboard=True,
             idle="yes",
