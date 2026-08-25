@@ -32,8 +32,16 @@ from PySide6.QtWidgets import (
 
 from ax_player import contact_sheets, debug_log, diagnostics, resume, settings, ui
 from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file
-from ax_player.player_widget import PlayerWidget
 from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
+
+# NOTE: ax_player.player_widget is deliberately *not* imported here. Importing
+# it runs `import mpv`, which fails outright unless libmpv is already on PATH
+# -- and on a machine with no mpv yet, putting it there is precisely what
+# _bootstrap_mpv_if_needed() exists to arrange. A module-level import runs
+# before main() ever gets to call that, so the first launch of a packaged
+# build died with "Cannot find libmpv-2.dll in your system %PATH%" and the
+# whole download-and-seed path could never execute. It is imported inside
+# AXPlayerWindow.__init__ instead, which only runs after the bootstrap.
 
 RESIZE_MARGIN = 6
 
@@ -248,6 +256,11 @@ class AXPlayerWindow(QWidget):
         self.sidebar.sheet_requested.connect(self.request_contact_sheet)
         self._sheet_signals = _SheetSignals()
         self._sheet_signals.done.connect(self._on_sheet_done)
+
+        # Deferred: see the note beside this module's imports. By the time a
+        # window is constructed, _bootstrap_mpv_if_needed() has run and libmpv
+        # is on PATH, so `import mpv` inside player_widget can succeed.
+        from ax_player.player_widget import PlayerWidget
 
         self.player = PlayerWidget(self)
         self.player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
