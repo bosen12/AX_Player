@@ -611,6 +611,36 @@ class _MpvFetchWorker(QThread):
             self.failed.emit(str(exc))
 
 
+def _log_mpv_runtime() -> None:
+    """Record which mpv root won and what it can do, once per launch.
+
+    default_mpv_root() picks between the bundled runtime and a personal
+    install (C:\\mpv and friends) purely on which one has libmpv-2.dll, and
+    the two can differ enormously: the slim bundled runtime has no
+    VapourSynth, so Fluid Motion's RIFE filter cannot load in it at all, and
+    without zz-fluid-ipc.lua the titlebar's fluid button (which just sends
+    F3) is a no-op. Nothing in the UI says which one is live, so that
+    capability can disappear -- a stray directory ahead of C:\\mpv in the
+    candidate list is enough -- with no visible symptom beyond interpolation
+    quietly never working again.
+
+    Same reasoning as play_url's logging in player_widget: a windowed build
+    has no console, so anything not written here has to be guessed at.
+    """
+    from ax_player.paths import default_mpv_root
+
+    root = default_mpv_root()
+    scripts = root / "scripts"
+    debug_log.log(
+        f"mpv runtime: root={root} "
+        f"libmpv={(root / 'libmpv-2.dll').is_file()} "
+        f"mpv_exe={(root / 'mpv.exe').is_file()} "
+        f"vapoursynth={(root / 'vapoursynth.dll').is_file()} "
+        f"fluid_ipc_lua={(scripts / 'zz-fluid-ipc.lua').is_file()} "
+        f"mpv_sockets_lua={(scripts / 'mpvSockets.lua').is_file()}"
+    )
+
+
 def _bootstrap_mpv_if_needed() -> bool:
     """Packaged-exe first run only: fetches mpv into a per-user folder if
     nothing usable is found anywhere (see paths.bundled_mpv_root). No-ops
@@ -674,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not _bootstrap_mpv_if_needed():
         return 1
+    _log_mpv_runtime()
 
     window = AXPlayerWindow()
     window.show()
