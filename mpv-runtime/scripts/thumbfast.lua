@@ -142,6 +142,13 @@ local spawn_waiting = false
 local spawn_working = false
 local script_written = false
 
+-- AX Player patch: see the retry in spawn()'s completion handler. Two
+-- attempts spaced far enough apart to clear a cold start, after which a
+-- refusal is treated as real and reported.
+local spawn_retries = 0
+local SPAWN_RETRY_LIMIT = 2
+local SPAWN_RETRY_DELAY = 0.6
+
 local dirty = false
 
 local x, y
@@ -513,6 +520,30 @@ local function spawn(time)
             if spawn_waiting and (success == false or (result.status ~= 0 and result.status ~= -2)) then
                 spawned = false
                 spawn_waiting = false
+                -- AX Player patch: retry a refused spawn before reporting it.
+                --
+                -- On Windows the first launch of mpv.exe in a session is
+                -- sometimes refused outright -- mpv logs "Subprocess failed:
+                -- init", meaning the process never started, and a later
+                -- attempt goes through. Reporting that immediately puts an
+                -- alarming five-second banner on screen for something that
+                -- fixes itself, which is what users actually see: the error
+                -- appears and hover previews work anyway.
+                --
+                -- The signal is result.error_string == "init", which is mpv's
+                -- own word for "the process could not be started". `success`
+                -- is not it: that reports whether the subprocess *command*
+                -- ran, and it stays true for a refusal. A process that did
+                -- start and then exited badly is a real configuration problem
+                -- and still gets reported at once, as does a refusal that
+                -- keeps repeating.
+                local refused = type(result) == "table" and result.error_string == "init"
+                if refused and spawn_retries < SPAWN_RETRY_LIMIT then
+                    spawn_retries = spawn_retries + 1
+                    mp.msg.warn("mpv subprocess refused, retrying ("..spawn_retries..")")
+                    mp.add_timeout(SPAWN_RETRY_DELAY, function() spawn(time) end)
+                    return
+                end
                 options.tone_mapping = "no"
                 mp.msg.error("mpv subprocess create failed")
                 if not spawn_working then -- notify users of required configuration
@@ -548,6 +579,10 @@ local function spawn(time)
                 end
                 spawn_working = true
                 spawn_waiting = false
+                -- AX Player patch: a spawn that worked earns the budget back,
+                -- so a later cold moment gets its own retries rather than
+                -- inheriting an exhausted count from startup.
+                spawn_retries = 0
             end
         end
     )
