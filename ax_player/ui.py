@@ -492,6 +492,9 @@ class DiagnosticsPanel(QWidget):
             f"掉幀   解碼 {_fmt(stats.get('dropped'))}  顯示 {_fmt(stats.get('delayed'))}",
             f"A/V    {_fmt(stats.get('avsync'), 's', 3)}",
         ]
+        shaders = stats.get("shaders") or 0
+        if shaders:
+            lines.append(f"著色器 Anime4K · {shaders} 層")
         cache = stats.get("cache")
         if cache is not None:
             lines.append(f"緩衝   {_fmt(cache, 's', 1)}")
@@ -515,16 +518,21 @@ class DiagnosticsPanel(QWidget):
         if not source or not output:
             return "播放中（尚未取得幀率）", True
         ratio = output / source
+        shaders = stats.get("shaders") or 0
+        # Anime4K and RIFE share one GPU, and falling behind looks identical
+        # either way -- so when both are on, name the collision instead of
+        # leaving the user to guess which one to turn down.
+        contention = "，Anime4K 同時運作中（Ctrl+0 可關閉）" if shaders else ""
         if stats.get("interpolating"):
             # Fluid Motion's multiplier isn't exposed here, but anything at or
             # above ~1.8x means it is producing roughly the doubled rate it
             # normally targets; well below that means it can't keep up.
             if ratio >= 1.8:
                 return f"補幀運作中 · {ratio:.1f}× ({output:.1f} fps)", True
-            return f"補幀落後 · 只有 {ratio:.1f}× ({output:.1f} fps)", False
+            return f"補幀落後 · 只有 {ratio:.1f}× ({output:.1f} fps){contention}", False
         if ratio >= 0.95:
             return f"正常播放 · {output:.1f} fps", True
-        return f"輸出幀率偏低 · {output:.1f} / {source:.1f} fps", False
+        return f"輸出幀率偏低 · {output:.1f} / {source:.1f} fps{contention}", False
 
 
 class ContactSheetPopup(QWidget):

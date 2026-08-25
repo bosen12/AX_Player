@@ -9,6 +9,8 @@ datas = [
     ("mpv-runtime/scripts", "mpv-runtime/scripts"),
     ("mpv-runtime/fonts", "mpv-runtime/fonts"),
     ("mpv-runtime/script-opts", "mpv-runtime/script-opts"),
+    # Anime4K: ~2.4MB of plain GLSL text, off until a key is pressed.
+    ("mpv-runtime/shaders", "mpv-runtime/shaders"),
     ("mpv-runtime/mpv.conf", "mpv-runtime"),
     ("mpv-runtime/input.conf", "mpv-runtime"),
     ("mpv-runtime/NOTICE.md", "mpv-runtime"),

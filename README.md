@@ -33,7 +33,7 @@ run.bat
 2. 如果 `mpv-runtime\` 跟 `C:\mpv` 都沒有可用的 `libmpv-2.dll`，執行 `setup_mpv.py` 自動去抓官方 mpv 建置（見下方「mpv 從哪裡來」）
 3. 啟動 AX Player
 
-第一次執行如果需要下載 mpv，會抓大約 250MB（`mpv.exe` + `libmpv-2.dll` + `yt-dlp.exe`），之後就不會再抓了。
+第一次執行如果需要下載 mpv，會抓約 **79MB** 壓縮檔（`mpv.exe` 32MB + `libmpv-2.dll` 30MB + `yt-dlp.exe` 17MB，解開後約 250MB），之後就不會再抓了。
 
 也可以直接帶參數開啟特定檔案或資料夾：
 
@@ -41,6 +41,35 @@ run.bat
 run.bat "D:\Videos\某部動畫"
 run.bat "D:\Videos\某部動畫\第01話.mkv"
 ```
+
+## 安裝後會發生什麼
+
+### 只裝 AX Player
+
+| 時機 | 動作 | 下載量 |
+|---|---|---|
+| 下載 | `AXPlayer.exe`（onefile） | 66 MB |
+| 首次啟動 | 若機器上找不到可用的 mpv，自動抓官方建置到 `%LOCALAPPDATA%\AXPlayer\mpv-runtime\`，並把內建的 uosc / thumbfast / Anime4K / 設定檔一併播種進去 | 79 MB |
+| 之後每次啟動 | 不再下載 | 0 |
+
+裝完就能播放，Anime4K 可用（`Ctrl+1`~`3`），**補幀不可用**——那需要 Fluid Motion。
+
+若機器上已經有 `C:\mpv` 之類的完整環境，上面的下載整個跳過，直接沿用你原本那套（見「mpv 從哪裡來」）。
+
+### 再加上 Fluid Motion（補幀）
+
+[Fluid Motion](https://github.com/bosen12/Fluid_Motion_Player) 是獨立的工具列程式，不是播放器。它會偵測執行中的播放器並注入 RIFE 補幀濾鏡。
+
+| 時機 | 動作 | 下載量 |
+|---|---|---|
+| 下載 | `FluidMotion.exe` | 37 MB |
+| 按「安裝 TensorRT 執行環境」 | VapourSynth 執行期（官方 mpv 有編進 bridge 但不附執行檔，Fluid Motion 會補上） | 21 MB |
+| 同上 | TensorRT / vs-mlrt + RIFE 模型 | 約 3.5 GB |
+| 首次播放每個新解析度 | 編譯 TensorRT engine（數分鐘），之後同解析度走快取 | 0 |
+
+Fluid Motion 會**直接問播放器它正在用哪個設定目錄**再安裝進去，所以不需要手動指定路徑——AX Player 自帶的 runtime、`C:\mpv`、套件管理員裝的 mpv 都適用。
+
+裝完之後按 `F3`（或 AX Player 標題列的 fluid 按鈕）切換補幀。補幀開啟時 Fluid Motion 會自動把解碼切成 copy-back 模式（VapourSynth 需要），關閉時還原。
 
 ## 打包成 EXE
 
@@ -62,7 +91,7 @@ build.bat
 
 AX Player 不會重新發明播放器核心，而是「嵌入」一份真正的 mpv。找 mpv 的順序（見 [`ax_player/paths.py`](ax_player/paths.py) 的 `default_mpv_root()`）：
 
-1. **`mpv-runtime/`**（專案自帶的精簡版）——`mpv.exe`、`libmpv-2.dll` 由 `setup_mpv.py` 向官方 [mpv-player-windows](https://sourceforge.net/projects/mpv-player-windows/) 建置抓取；[uosc](mpv-runtime/scripts/uosc)、[thumbfast](mpv-runtime/scripts/thumbfast.lua)、字型、乾淨的 `mpv.conf`/`input.conf` 則是直接放進這個 repo（都是很小的文字/lua 檔）。這份設定**刻意不含** Anime4K 濾鏡、VapourSynth、TensorRT 這類進階設定——那些是重度客製化的東西，不該是新用戶第一次啟動就要面對的複雜度。
+1. **`mpv-runtime/`**（專案自帶的精簡版）——`mpv.exe`、`libmpv-2.dll` 由 `setup_mpv.py` 向官方 [mpv-player-windows](https://sourceforge.net/projects/mpv-player-windows/) 建置抓取；[uosc](mpv-runtime/scripts/uosc)、[thumbfast](mpv-runtime/scripts/thumbfast.lua)、字型、乾淨的 `mpv.conf`/`input.conf` 則是直接放進這個 repo（都是很小的文字/lua 檔）。另外附帶 [Anime4K](https://github.com/bloc97/Anime4K) 著色器（約 2.4MB 純文字，**預設關閉**，見下方「快捷鍵」）。這份設定**不含** VapourSynth 與 TensorRT——補幀那一整套由 [Fluid Motion](https://github.com/bosen12/Fluid_Motion_Player) 自己安裝，它會直接問播放器目前用的是哪個設定目錄再裝進去。
 2. **`C:\mpv`**——如果你自己已經有一套完整的 mpv 環境（例如裝好 Anime4K 濾鏡、接了 [Fluid Motion](https://github.com/bosen12/Fluid_Motion_Player) 的補幀），AX Player 會優先偵測並直接使用，`mpv-runtime/` 的版本完全不會被碰到
 3. **`%ProgramFiles%\mpv`**——標準安裝路徑的 fallback
 
@@ -82,13 +111,48 @@ py -3.10 setup_mpv.py
 
 ## 快捷鍵
 
-播放相關的快捷鍵全部是 mpv/uosc 原生的（空白鍵暫停、方向鍵快轉、`f` 全螢幕……），因為鍵盤事件是直接轉發給 mpv 處理的，不是 AX Player 自己刻的。`mpv-runtime/input.conf` 沒有內建 Anime4K 那類自訂快捷鍵——如果你想加，直接編輯那個檔案即可（或者讓 `default_mpv_root()` 指向你自己那份帶自訂快捷鍵的 mpv 設定）。
+播放相關的快捷鍵全部是 mpv/uosc 原生的（空白鍵暫停、方向鍵快轉、`f` 全螢幕……），因為鍵盤事件是直接轉發給 mpv 處理的，不是 AX Player 自己刻的。
 
-視窗殼本身：
+### 內建綁定
 
 | 按鍵 | 動作 |
 |---|---|
-| Esc | 全螢幕時退出全螢幕（實際上是轉發給 mpv 的 `ESC` 綁定，它本來就會 `set fullscreen no`） |
+| `Ctrl+1` | Anime4K **Mode A**——先修復再放大，1080p 動畫的通用選擇 |
+| `Ctrl+2` | Anime4K **Mode B**——較柔和的修復，適合線條細、畫風柔的片源 |
+| `Ctrl+3` | Anime4K **Mode C**——放大同時降噪，適合老片或壓縮過度的片源 |
+| `Ctrl+0` | 關閉所有著色器 |
+| `F1` | mpv 主控台 |
+| `F3` | 切換 [Fluid Motion](https://github.com/bosen12/Fluid_Motion_Player) 補幀（需 Fluid Motion 正在執行） |
+| `Ctrl+F` | 搜尋播放清單 |
+| `Delete` | 從清單移除選取項目 |
+| `Esc` | 退出全螢幕 |
+
+Anime4K **預設關閉**，因為它是動畫放大器，套在真人影片上只會更糟。
+
+只綁上游文件的三組標準預設。更長的手調鏈在大顯卡上效果更好，但不適合當作預設出貨——而且它們**跟 Fluid Motion 的補幀搶同一顆 GPU**。兩者一起全開在多數顯卡上會掉幀，所以診斷面板（標題列 stats 按鈕）會在兩邊同時運作時明講，否則畫面只會卡，看不出該關哪一個。
+
+### 要改設定或快捷鍵,改哪裡
+
+先確認你的 mpv 設定目錄是哪一個——**AX Player 啟動時會把它寫進 log**：
+
+```
+%LOCALAPPDATA%\AXPlayer\debug.log
+```
+
+找 `mpv runtime:` 開頭那行，它會列出目前使用的目錄以及該目錄具備哪些能力（VapourSynth、補幀腳本等）。接著編輯該目錄下的檔案：
+
+| 檔案 | 用途 |
+|---|---|
+| `input.conf` | 快捷鍵綁定（含上面那幾組 Anime4K） |
+| `mpv.conf` | mpv 本身的設定（硬解、快取、輸出……） |
+| `shaders/` | 著色器檔案，可自行增減後在 `input.conf` 串成自己的鏈 |
+| `script-opts/` | uosc、thumbfast 等腳本的選項 |
+
+改完重開 AX Player 生效。
+
+> **注意**：打包版第一次啟動會把這些檔案複製到 `%LOCALAPPDATA%\AXPlayer\mpv-runtime\`，之後就從那裡讀。改 repo 裡的 `mpv-runtime/` 不會影響已安裝的版本——請改 log 指出的那個目錄。
+>
+> 另外，如果你原本就有一套完整的 `C:\mpv`，AX Player 會優先用它（見「mpv 從哪裡來」），這時候要改的是 `C:\mpv` 底下的檔案。
 
 ## 已知限制 / 疑難排解
 

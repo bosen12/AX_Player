@@ -10,6 +10,8 @@ can play video without the user separately installing/configuring mpv.
 | scripts/thumbfast.lua | vendored from `C:\mpv` install, upstream `master` branch | MPL-2.0 (see `LICENSES/thumbfast-MPL-2.0.txt`) | https://github.com/po5/thumbfast |
 | fonts/uosc_icons.otf, fonts/uosc_textures.ttf | bundled with uosc above | same as uosc | https://github.com/tomasklaen/uosc |
 | yt-dlp.exe | latest release | Unlicense (public domain) | https://github.com/yt-dlp/yt-dlp, fetched by `setup_mpv.py`. Used by mpv's own built-in `ytdl_hook` (not embedded in mpv) to resolve streaming sites for "open URL" playback. |
+| shaders/Anime4K_*.glsl (37 files) | vendored from `C:\mpv` install, upstream v4.x | MIT (see `LICENSES/Anime4K-MIT.txt`; the notice is also kept in each `.glsl` header) | https://github.com/bloc97/Anime4K |
+| shaders/Anime4K_AutoDownscalePre_x{2,4}.glsl | as above | Unlicense (public domain; notice kept in each file header) | https://github.com/bloc97/Anime4K |
 
 ## GPL note -- please read before choosing AX Player's own license
 

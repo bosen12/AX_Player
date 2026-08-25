@@ -258,6 +258,12 @@ class PlayerWidget(QWidget):
             "avsync": self._prop("avsync"),
             "cache": self._prop("demuxer_cache_duration"),
             "interpolating": "@fluid" in vf or "fluid_rife" in vf,
+            # Anime4K and Fluid Motion's RIFE both run on the GPU and compete
+            # for it. The only symptom of overcommitting is dropped frames,
+            # which says nothing about which of the two to turn down -- so
+            # report how many shader passes are loaded and let the panel say
+            # when both are on at once.
+            "shaders": len(self._prop("glsl_shaders") or []),
         }
 
     def _mpv_cmd(self, *args: str) -> None:
