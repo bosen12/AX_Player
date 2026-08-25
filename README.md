@@ -205,4 +205,8 @@ AX Player 的核心設計原則：**mpv 已經把播放器這件事做得很好�
 
 ## 授權
 
-AX Player 本身的授權待定——見上方「授權注意事項」。`mpv-runtime/` 內個別元件的授權見 [`mpv-runtime/NOTICE.md`](mpv-runtime/NOTICE.md)。
+AX Player 以 **GPLv2+** 釋出,完整條款見 [`LICENSE`](LICENSE)。
+
+選 GPLv2+ 的原因見上方「授權注意事項」:AX Player 把 GPLv2+ 的 `libmpv-2.dll` 載入同一個行程,這在 GPL 認定下通常算連結。附帶一提,打包版**不含** mpv 二進位檔(`mpv.exe`、`libmpv-2.dll` 由 `mpv_fetch.py` 在首次啟動時抓到使用者自己的目錄),所以這裡並沒有散布 GPL 二進位檔。
+
+`mpv-runtime/` 內個別元件的授權(Anime4K、uosc、thumbfast、字型、yt-dlp)列在 [`mpv-runtime/NOTICE.md`](mpv-runtime/NOTICE.md) 的表格。

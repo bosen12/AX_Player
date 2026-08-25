@@ -24,15 +24,25 @@ practice this means the combined work (AX Player + libmpv-2.dll running
 together in one process) likely needs to be distributed under
 GPL-compatible terms.
 
-Options, in case AX Player's license hasn't been decided yet:
-- License AX Player itself under GPLv2+ (simplest, no build changes).
+**Resolved: AX Player is released under GPLv2+** (see `LICENSE` in the
+repository root) -- the first of the options that were open here, chosen
+because it needs no build or architecture change and leaves no ambiguity.
+
+Note that the packaged builds do **not** redistribute mpv itself: neither
+`mpv.exe` nor `libmpv-2.dll` is inside the exe (see `AXPlayer.spec`), and
+`mpv_fetch.py` downloads them to a per-user folder on first launch. So no
+GPL binary is being distributed here; the linking question above applies
+to the combined work as it runs on the user's machine, which GPLv2+
+covers.
+
+The two alternatives, recorded in case they matter later:
 - Have `setup_mpv.py` fetch an LGPL-only mpv build instead (mpv can be
   built with `--enable-lgpl`, which excludes some GPL-only optional
-  components like certain vf filters) -- lets AX Player keep any license.
-- Keep spawning mpv as a *separate process* instead of loading libmpv
-  in-process (this is what the standalone `mpv.exe` thumbnail/thumbfast
-  subprocesses already do, and process boundaries sidestep the linking
-  question) -- but that's the embedding architecture change this project
-  deliberately avoided for the main playback window.
+  components like certain vf filters) -- would let AX Player relicense.
+- Spawn mpv as a *separate process* instead of loading libmpv in-process
+  (this is what the standalone `mpv.exe` thumbnail/thumbfast subprocesses
+  already do, and process boundaries sidestep the linking question) --
+  but that's the embedding architecture change this project deliberately
+  avoided for the main playback window.
 
 This file exists so the choice gets made deliberately, not by omission.
