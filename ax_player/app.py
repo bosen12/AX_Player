@@ -49,6 +49,29 @@ RESIZE_MARGIN = 6
 EAGER_SHEET_LIMIT = 12
 
 
+def _emit_safely(signal, *args) -> None:
+    """Emit unless the receiving object has already been torn down.
+
+    Every signals object here outlives its jobs only as long as the window
+    does. Closing with work still queued -- a folder of uncached videos shut
+    within a second of opening reproduces it -- destroys the C++ side while
+    pool threads are still finishing, and the emit then raises
+    "RuntimeError: Signal source has been deleted" straight out of run(),
+    where nothing catches it. debug.log has 12 of those from one such close.
+
+    Swallowing it is the whole fix: the result is a cached file on disk that
+    the next launch picks up anyway, and the only thing lost is a repaint of
+    a window that is already gone. Draining the pool instead was measured and
+    rejected -- waitForDone() blocks the close for as long as the slowest job
+    runs, which for a stalled grab is GRAB_TIMEOUT, so it would trade a log
+    line for a 30-second freeze on exit.
+    """
+    try:
+        signal.emit(*args)
+    except RuntimeError:
+        pass
+
+
 class _JobSignals(QObject):
     thumb_done = Signal(str, str)  # video path, thumbnail image path ("" on failure)
 
@@ -62,7 +85,7 @@ class _ThumbJob(QRunnable):
     @Slot()
     def run(self) -> None:
         path = generate_thumbnail(self._video)
-        self._signals.thumb_done.emit(str(self._video), str(path) if path else "")
+        _emit_safely(self._signals.thumb_done, str(self._video), str(path) if path else "")
 
 
 class _PruneCacheJob(QRunnable):
@@ -93,7 +116,7 @@ class _SheetJob(QRunnable):
     @Slot()
     def run(self) -> None:
         path = contact_sheets.generate_contact_sheet(self._video)
-        self._signals.done.emit(str(self._video), str(path) if path else "")
+        _emit_safely(self._signals.done, str(self._video), str(path) if path else "")
 
 
 def _sort_playlist(paths: list[Path], mode: str) -> list[Path]:
@@ -151,7 +174,8 @@ class _ScanJob(QRunnable):
             )
         except OSError:
             playlist = []
-        self._signals.done.emit(
+        _emit_safely(
+            self._signals.done,
             str(self._folder),
             [str(p) for p in playlist],
             str(self._select) if self._select else "",
@@ -460,7 +484,23 @@ class AXPlayerWindow(QWidget):
         # re-rooting the whole library onto that subdirectory (and moving
         # last_folder with it) just for playing a row that was already listed.
         if self._folder is None or video not in self._playlist:
-            self.open_folder(video.parent, select=video)
+            # Not listed: rescan. Which folder to rescan is the question the
+            # membership test above only half answered -- reopening
+            # video.parent is right for a file from somewhere else, but wrong
+            # for one that lives under the open library and simply post-dates
+            # the scan (dropped in, or passed on the command line). That case
+            # re-rooted the library onto the subdirectory, which is the bug
+            # the membership test was added to fix, reached by another door.
+            #
+            # Only when the library is recursive: a flat scan of self._folder
+            # would not list a file in a subdirectory either, and select would
+            # miss again and land on index 0 -- playing the wrong video.
+            under_library = (
+                self._recursive
+                and self._folder is not None
+                and self._folder in video.parents
+            )
+            self.open_folder(self._folder if under_library else video.parent, select=video)
             return
         # By path, not by sidebar position: after a re-sort during playback the
         # two orders differ on purpose (see _on_folder_scanned), and an index
@@ -644,6 +684,13 @@ class AXPlayerWindow(QWidget):
         # so the teardown happens behind a window that is already gone.
         self.hide()
         QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        # Drop what has not started yet. Closing a folder of uncached videos
+        # can leave a dozen frame-grabs queued, each two mpv subprocesses, and
+        # running them out after the window is gone is pure cost. Only the
+        # queue is cleared -- clear() cannot touch a job already on a thread,
+        # and waiting for those is what _emit_safely exists to avoid.
+        self._thumb_pool.clear()
+        self._scan_pool.clear()
         self.player.shutdown()
         super().closeEvent(event)
 

@@ -371,11 +371,23 @@ def generate_contact_sheet(video: Path, frame_count: int = FRAME_COUNT) -> Path 
                 return None
             os.replace(staging, dest)
         except OSError:
+            return None
+        finally:
+            # In a finally, not just on the OSError path: QImage.save reports
+            # a disk-full or permission failure by *returning False*, not by
+            # raising, and it can leave a partial file behind when it does.
+            # That file then survives every cleanup there is -- the scratch
+            # sweep only looks at directories, the stale-grid sweep keeps
+            # anything ending in the current frame count, and the LRU only
+            # runs once the cache is over its cap -- so it sits there for
+            # good. Measured: 353 bytes left behind, present after all three.
+            #
+            # A successful os.replace has already moved it, so this is a no-op
+            # on the path that worked.
             try:
                 staging.unlink(missing_ok=True)
             except OSError:
                 pass
-            return None
         return dest
     finally:
         try:
