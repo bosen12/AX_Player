@@ -63,14 +63,37 @@ local pre_0_30_0 = mp.command_native_async == nil
 local pre_0_33_0 = true
 local support_media_control = mp.get_property_native("media-controls") ~= nil
 
+-- AX Player patch: no `env` on the subprocess commands.
+--
+-- This is the actual cause of "cannot create mpv subprocess", not a cold
+-- start and not the lack of a console. Measured against this machine's
+-- libmpv over raw JSON IPC, the same command repeated eight times:
+--
+--   8x without env, back to back      ........   (. spawned, X refused)
+--   8x with env,    back to back      XXXXXXXX
+--   8x with env,    0.5s apart        ........
+--
+-- Supplying `env` makes closely spaced spawns fail inside mpv's Windows
+-- subprocess implementation -- CreateProcessW returns FALSE with
+-- GetLastError 87 (ERROR_INVALID_PARAMETER), which mpv reports back as
+-- status -3 / error_string "init". Spread the same calls out and they all
+-- succeed; drop `env` and they succeed at any rate. Hovering down the
+-- sidebar is exactly a burst of closely spaced spawns, which is why the
+-- failures always arrive in clusters in debug.log.
+--
+-- Nothing is lost by removing it. CreateProcessW with lpEnvironment=NULL
+-- gives the child the parent's environment, so the PATH this was passing
+-- is inherited anyway -- and thumbfast only passes it so that a bare
+-- "mpv" resolves on PATH, which does not apply here: AX Player points
+-- mpv_path at an absolute mpv.exe (see player_widget.py's script_opts).
 function subprocess(args, async, callback)
     callback = callback or function() end
 
     if not pre_0_30_0 then
         if async then
-            return mp.command_native_async({name = "subprocess", playback_only = true, args = args, env = "PATH="..os.getenv("PATH")}, callback)
+            return mp.command_native_async({name = "subprocess", playback_only = true, args = args}, callback)
         else
-            return mp.command_native({name = "subprocess", playback_only = false, capture_stdout = true, args = args, env = "PATH="..os.getenv("PATH")})
+            return mp.command_native({name = "subprocess", playback_only = false, capture_stdout = true, args = args})
         end
     else
         if async then
@@ -142,10 +165,19 @@ local spawn_waiting = false
 local spawn_working = false
 local script_written = false
 
--- AX Player patch: see the retry in spawn()'s completion handler. Two
--- attempts spaced far enough apart to clear a cold start, after which a
--- refusal is treated as real and reported.
-local spawn_retries = 0
+-- AX Player patch: see the retry in spawn()'s completion handler.
+--
+-- Kept as a belt-and-braces guard now that dropping `env` (see subprocess()
+-- above) removes the condition it was written for. It is deliberately small:
+-- a refusal that survives this is a real one and should be reported rather
+-- than retried around.
+--
+-- The budget is per spawn attempt, not global. It used to be a module-level
+-- counter reset only in the branch that runs when a *spawned* helper exits,
+-- and thumbfast's helper is long-lived -- so in a session where no spawn ever
+-- succeeded the count never came back, and after the first two refusals every
+-- later hover reported immediately with no retry at all. debug.log shows
+-- exactly that: 159 refusals against 24 retries.
 local SPAWN_RETRY_LIMIT = 2
 local SPAWN_RETRY_DELAY = 0.6
 
@@ -440,8 +472,13 @@ end
 
 local activity_timer
 
-local function spawn(time)
+-- AX Player patch: `retries` is how many times this particular spawn has
+-- already been refused. Carried as an argument rather than kept in a
+-- module-level counter so every fresh spawn starts with a full budget --
+-- see the note beside SPAWN_RETRY_LIMIT for what the shared counter did.
+local function spawn(time, retries)
     if disabled then return end
+    retries = retries or 0
 
     local path = properties["path"]
     if path == nil then return end
@@ -538,32 +575,27 @@ local function spawn(time)
                 -- and still gets reported at once, as does a refusal that
                 -- keeps repeating.
                 local refused = type(result) == "table" and result.error_string == "init"
-                if refused and spawn_retries < SPAWN_RETRY_LIMIT then
-                    spawn_retries = spawn_retries + 1
-                    mp.msg.warn("mpv subprocess refused, retrying ("..spawn_retries..")")
-                    mp.add_timeout(SPAWN_RETRY_DELAY, function() spawn(time) end)
+                if refused and retries < SPAWN_RETRY_LIMIT then
+                    local attempt = retries + 1
+                    mp.msg.warn("mpv subprocess refused, retrying ("..attempt..")")
+                    mp.add_timeout(SPAWN_RETRY_DELAY, function() spawn(time, attempt) end)
                     return
                 end
                 options.tone_mapping = "no"
                 -- AX Player patch: the "cannot create mpv subprocess"
                 -- banner is gone -- mp.msg.error below is the only report
-                -- left.
+                -- left. With `env` dropped from subprocess() this should
+                -- now be unreachable in normal use; reaching it means
+                -- something else is wrong and belongs in debug.log.
                 --
-                -- Measured with an IAT hook on the CreateProcessW that
-                -- libmpv itself calls: a refused spawn is a real refusal
-                -- (the call returns FALSE, GetLastError 87 /
-                -- ERROR_INVALID_PARAMETER, and no child process exists),
-                -- not a callback misreading a success. But it is
-                -- transient: the very next attempt goes through, and
-                -- thumbfast re-spawns on the following hover anyway, so
-                -- hover previews work either way. It only happens in a
-                -- console-less (GUI) host like AX Player; the identical
-                -- spawn from a process that has a console never fails.
-                --
-                -- So the banner reported something real and yet useless
-                -- to the user: five seconds of red text over the video
-                -- for a condition that has already fixed itself by the
-                -- time it can be read.
+                -- The IAT hook on libmpv's own CreateProcessW measured the
+                -- refusal correctly (FALSE, GetLastError 87 /
+                -- ERROR_INVALID_PARAMETER, no child process). What was
+                -- wrong was the explanation built on top of it: it is not
+                -- transient, and it has nothing to do with the host having
+                -- a console. A host *with* a console fails identically. It
+                -- is the `env` argument, and it is reliable enough to
+                -- reproduce 8 times out of 8 -- see subprocess() above.
                 mp.msg.error("mpv subprocess create failed")
                 if not spawn_working then -- notify users of required configuration
                     if options.mpv_path == "mpv" then
@@ -598,10 +630,6 @@ local function spawn(time)
                 end
                 spawn_working = true
                 spawn_waiting = false
-                -- AX Player patch: a spawn that worked earns the budget back,
-                -- so a later cold moment gets its own retries rather than
-                -- inheriting an exhausted count from startup.
-                spawn_retries = 0
             end
         end
     )

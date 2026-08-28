@@ -157,13 +157,25 @@ Anime4K **預設關閉**，因為它是動畫放大器，套在真人影片上�
 ## 已知限制 / 疑難排解
 
 - **縮圖產生變慢或系統打嗝**：縮圖是靠背景執行緒個別啟動 `mpv.exe` 子行程硬解抓幀，數量跟 CPU 核心數綁定並設有上限。開資料夾時每部影片會產生一張 hover 用的 3×3 預覽格，過去那要啟動九次 mpv（一格一次），因為成本幾乎全在啟動行程而非解碼——單幀 0.48 秒、九幀 4.54 秒。現在改用 mpv 的 `--sstep` 在同一個行程內走完九個時間點，每張 1.04 秒，二十部影片的資料夾從約兩百個子行程降到二十個。若同時有其他吃 GPU 解碼資源的程式在跑（例如 Fluid Motion 正在編譯補幀引擎），仍可能撞在一起，只是窗口小了很多
-- **`thumbfast: cannot create mpv subprocess`**：thumbfast 抓 hover 縮圖用的獨立 mpv 子行程**建立失敗**——mpv 記在 `debug.log` 裡的原文是 `Subprocess failed: init`，也就是行程根本沒啟動，跟解碼或 GPU 無關（實測三十個 mpv 同時抓幀，這種啟動仍然零失敗）。在 Windows 上這通常只發生在該次工作階段**第一次**啟動 `mpv.exe` 時，之後就正常，所以縮圖預覽實際上是會出現的。
+- **`thumbfast: cannot create mpv subprocess`**：原因是 thumbfast 呼叫 mpv 的 `subprocess` 指令時帶了 `env` 參數。在 Windows 上，只要帶 `env` 而且呼叫密集，mpv 就會拒絕建立行程（`CreateProcessW` 回 FALSE、`GetLastError` 87 / `ERROR_INVALID_PARAMETER`，mpv 回報成 `status=-3` / `error_string="init"`）。滑鼠掃過側邊欄正好就是密集呼叫，所以 `debug.log` 裡的失敗永遠是**一整串**而不是零星幾筆。
 
-  既然失敗是暫時的，[`mpv-runtime/scripts/thumbfast.lua`](mpv-runtime/scripts/thumbfast.lua) 帶了一小段修改：被拒絕時**靜默重試兩次**（間隔 0.6 秒），三次都被拒才顯示訊息。判斷依據是 mpv 回報的 `error_string == "init"`（行程沒啟動），所以「有啟動但立刻異常結束」這種真正的設定問題仍然會立刻報出來，不會被藏起來。
+  [`mpv-runtime/scripts/thumbfast.lua`](mpv-runtime/scripts/thumbfast.lua) 因此把 `env` 拿掉。不會有損失：`CreateProcessW` 的 `lpEnvironment` 傳 NULL 時子行程**直接繼承父行程的環境**，thumbfast 傳它只是為了讓 POSIX 上裸 `mpv` 能在 PATH 上被找到，而這裡 `mpv_path` 給的是絕對路徑。
+
+  同一個 host、同一段 12 次連續請求，只差 `env`：
+
+  | | helper 行程 | 縮圖輸出 | `create failed` |
+  |---|---|---|---|
+  | 不帶 `env` | 1 | 90,400 bytes | 0 |
+  | 帶 `env` | 4 個都沒真的起來 | 無 | 7 |
+
+  被拒時仍然會靜默重試兩次（間隔 0.6 秒）當保險，判斷依據是 `error_string == "init"`，所以「有啟動但立刻異常結束」這種真正的設定問題仍會立刻報出來。
 
   如果你用的是自己的 `C:\mpv` 而非內建 runtime，那份 `scripts/thumbfast.lua` 不含這個修改，訊息還是會出現——把 `mpv-runtime/scripts/thumbfast.lua` 複製過去即可。
 
-  > 曾經試過改用 thumbfast 的 `spawn_first=yes`（把第一次啟動提前到載入檔案時，搶在失敗前先成功一次）。**那個做法會讓情況變糟**：從檔案總管雙擊影片啟動時，載入時刻正好是程式冷啟動最忙的時候，反而更容易被拒。已經改回預設
+  > 兩個曾經試過、但**方向就錯了**的做法，別再走一次：
+  >
+  > - `spawn_first=yes`（把第一次啟動提前到載入檔案時）。當時的解讀是「冷啟動比較容易被拒」，實際上冷啟動不是變因，密集度才是。
+  > - 「這只發生在沒有 console 的 GUI 行程」。**不成立**：有 console 的 host 帶 `env` 一樣 8/8 失敗。當初 `py` / `pyw` 的對照差在時序，不在 console。
 - **拖曳只能丟在側邊欄才有反應**：不會，影片區域跟側邊欄都支援拖放；如果真的沒反應，請確認拖曳的是真實檔案（不是瀏覽器分頁之類的虛擬項目）
 
 ## 專案結構

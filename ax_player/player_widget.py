@@ -149,12 +149,19 @@ class PlayerWidget(QWidget):
             # pipes -- and mpv only opens a pipe at all when something sets
             # input-ipc-server.
             #
-            # Setting it here rather than leaving it to FM's own
-            # zz-fluid-ipc.lua is what makes this reliable: mpv binds the IPC
-            # listener exactly once, so whichever Lua script claims it first
-            # wins, and a config dir that also ships mpvSockets.lua (loaded
-            # before "zz-" alphabetically) silently takes the name instead.
-            # An init option is set before any script runs, so it always wins.
+            # This is a request, not a guarantee. It used to claim that an
+            # init option always wins over a script's later set_property,
+            # because mpv binds the IPC listener once -- that is not what
+            # mpv does. Measured with exactly this call against C:\\mpv, the
+            # pipe that actually appears is mpvSockets.lua's
+            # %TEMP%\\mpvSockets\\<pid>: mpv rebinds when the option changes
+            # at runtime, so the last writer wins and "zz-" only guarantees
+            # zz-fluid-ipc.lua loads *after* mpvSockets.lua, not before.
+            #
+            # Harmless either way -- Fluid Motion discovers the pid from the
+            # mpvSockets pipe too (see its mpv_detect._embedded_player_pids)
+            # -- so this stays as the name to prefer when nothing else has
+            # taken it, e.g. a config dir without mpvSockets.lua.
             input_ipc_server=f"fluid-mpv-{os.getpid()}",
             input_default_bindings=True,
             input_vo_keyboard=True,
