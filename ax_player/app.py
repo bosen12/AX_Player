@@ -453,7 +453,13 @@ class AXPlayerWindow(QWidget):
 
     def play(self, video: Path) -> None:
         video = Path(video).resolve()
-        if self._folder is None or video.parent != self._folder:
+        # Membership of the current playlist, not "is it a direct child of the
+        # open folder". With 含子資料夾 on, every file under a subdirectory is
+        # in the library but none of them is a child of the folder, so the
+        # parent test sent each click through open_folder(video.parent) --
+        # re-rooting the whole library onto that subdirectory (and moving
+        # last_folder with it) just for playing a row that was already listed.
+        if self._folder is None or video not in self._playlist:
             self.open_folder(video.parent, select=video)
             return
         # By path, not by sidebar position: after a re-sort during playback the
@@ -534,6 +540,23 @@ class AXPlayerWindow(QWidget):
         self._requested_sheets.add(path)
         self._thumb_pool.start(_SheetJob(video, self._sheet_signals), priority)
 
+    def _sheet_finished(self, path: str) -> None:
+        """Drop the in-flight marker. Unlike _requested_thumbs this really is
+        only "a job is running", not "this was tried once".
+
+        Leaving entries in permanently made a sheet unrecoverable after the
+        LRU eviction in cache.prune_cache removed its file: the cache lookup
+        above misses, the in-flight check then returns early, and the popup
+        sits on "正在產生預覽…" forever. A failed generation was equally
+        stuck for the rest of the session.
+
+        Safe to retry from here in a way _requested_thumbs is not: a sheet is
+        only ever asked for by a deliberate hover behind the 350ms intent
+        delay, whereas a thumbnail is asked for by the delegate's paint, so
+        discarding those would re-queue a broken file on every repaint.
+        """
+        self._requested_sheets.discard(path)
+
     def _queue_all_contact_sheets(self) -> None:
         # Pre-generate the top of the list up front instead of waiting for a
         # hover -- request_contact_sheet's cache-hit and in-flight checks make
@@ -553,6 +576,7 @@ class AXPlayerWindow(QWidget):
             self.request_contact_sheet(str(video), priority=-1)
 
     def _on_sheet_done(self, path: str, image_path: str) -> None:
+        self._sheet_finished(path)
         pixmap = ui.thumbnail_pixmap(image_path) if image_path else QPixmap()
         self.sidebar.show_contact_sheet(path, pixmap)
 

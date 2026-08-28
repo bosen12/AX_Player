@@ -278,15 +278,35 @@ def generate_contact_sheet(video: Path, frame_count: int = FRAME_COUNT) -> Path 
             if step > 0
             else []
         )
-        if not produced:
-            # No usable step (a clip too short to space frames across) or the
-            # single-process grab came back empty -- fall back to grabbing them
-            # one at a time, which is slower but positions each seek itself.
+        if len(produced) < len(times):
+            # Any shortfall, not just an empty result. The single-process grab
+            # returns what has settled when it hits GRAB_TIMEOUT, and a sheet
+            # is cached under a name that states its frame count and is never
+            # revisited -- so accepting eight of nine here cached an eight-cell
+            # sheet for good. v1.1.4 closed one route to that (a frame read
+            # before mpv had finished writing it); a timeout is the other.
+            #
+            # The fallback re-grabs every frame in its own process, positioning
+            # each seek itself, which costs the ~4.5s that --sstep exists to
+            # avoid -- acceptable for a path that should be rare, and it is the
+            # honest retry: if it too comes up short, that timestamp genuinely
+            # will not decode and the shorter sheet is the real answer rather
+            # than a timing accident.
+            #
+            # Paired with its own timestamp rather than zipped against times
+            # positionally: a frame the fallback cannot grab is simply absent
+            # from the list, so position i stops meaning times[i] and every
+            # later cell would be labelled with the wrong one.
+            grabbed = []
             for i, seconds in enumerate(times):
                 one = _grab_frame_at(video, seconds, tmp_dir / f"fallback{i:02d}.jpg")
                 if one is not None:
-                    produced.append(one)
-        for frame_path, seconds in zip(produced, times):
+                    grabbed.append((one, seconds))
+        else:
+            # The fast path walks the file forward from times[0] in `step`
+            # increments, so its nth frame is times[n] by construction.
+            grabbed = list(zip(produced, times))
+        for frame_path, seconds in grabbed:
             image = QImage(str(frame_path))
             if not image.isNull():
                 frames.append((image, _format_timestamp(seconds)))
