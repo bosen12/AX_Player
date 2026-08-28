@@ -1,6 +1,8 @@
 # 交接說明 — AX Player / Fluid Motion
 
-寫給接手的人。內容截至 2026-08-26 01:45。**這一份取代了 00:15 那一版**，其中兩個「未解決問題」現在都已經有答案，而且**上一版對它們的描述是錯的** —— 見第 1 節。
+寫給接手的人。內容截至 2026-08-28。
+
+**第 1 節被改寫過兩次，兩次都是因為前一版寫錯了。** 01:45 那一版說 thumbfast 的 spawn 失敗是「暫時性、只發生在無 console 的行程、縮圖其實正常」—— 三句都不成立。根因（`subprocess` 的 `env` 參數）在 v1.1.5 才找到，見 §1.1。
 
 所有數字都是實測得來的，不是估計。方法寫在各節裡，可以重驗。
 
@@ -23,24 +25,59 @@
 
 **重要**：打包版 AX Player 的 mpv root 解析順序是 `%LOCALAPPDATA%\AXPlayer\mpv-runtime` → `C:\mpv` → `%ProgramFiles%\mpv`。第一個不存在，所以**打包版實際使用 `C:\mpv`**。改 mpv 設定或 lua 要改那裡，不是 repo 的 `mpv-runtime/`（那份是給原始碼版和打包進 exe 的種子用的，兩邊要一起改）。
 
-目前版本：**AX Player v1.1.4**、**Fluid Motion v1.4.3**，都已 commit、push、build、部署、發 release。
+目前版本：**AX Player v1.1.5**、**Fluid Motion v1.4.4**。（v1.1.4 / v1.4.3 之前的版本都已 commit、push、build、部署、發 release。）
 
 ---
 
-## 1. 上一版列為「未解決」的兩件事 —— 都結案了
+## 1. 兩個長期問題 —— 都結案了
 
-### 1.1 `thumbfast: ERROR! cannot create mpv subprocess`（已處置，v1.1.3）
+### 1.1 `thumbfast: ERROR! cannot create mpv subprocess`
 
-**根本原因查到了。** 方法：用 IAT hook 把 libmpv 匯入表裡的 `CreateProcessW` 換掉，直接觀察 mpv 內部真正的呼叫。
+**⚠️ 這一節在 08-26 01:45 那一版是錯的。真正的根因見下面的「根因與修法」。**
 
-- 失敗是**真的**：`CreateProcessW` 回傳 FALSE，`GetLastError` = **87（`ERROR_INVALID_PARAMETER`）**，系統上不存在對應的子行程。網路上流傳的「假陽性、回呼誤判」說法在這台機器上不成立。
-- 但它是**暫時性**的：同一次執行中，v1.1.2 加的重試第一次就成功了。
-- 而且**只有無 console 的 GUI 行程會遇到**。最小重現：同一支腳本（載入 `C:\mpv` 的 libmpv、同一份 config、讓 thumbfast 自己 spawn），用 `py` 跑（有 console）成功，用 `pyw` 跑（無 console）失敗。這解釋了為什麼只有打包版會出現。
-- 就算三次重試全失敗也沒有實際損失：thumbfast 會把狀態重設，**下一次 hover 會再 spawn 一次**。所以進度條縮圖一直是好的 —— 使用者說「有錯誤但縮圖正常」是對的。
+當時查到而且**正確**的部分：用 IAT hook 把 libmpv 匯入表裡的 `CreateProcessW` 換掉之後，觀察到失敗是真的 —— `CreateProcessW` 回傳 FALSE，`GetLastError` = **87（`ERROR_INVALID_PARAMETER`）**，系統上不存在對應的子行程。「假陽性、回呼誤判」的說法在這台機器上不成立。
 
-**處置**：v1.1.3 移除那個五秒紅字橫幅（`mpv-runtime/scripts/thumbfast.lua`，三處 `show-text`），失敗只寫進 `debug.log`。v1.1.2 的重試保留。原始碼裡有註解記錄上述量測，位置在 `mp.msg.error("mpv subprocess create failed")` 上方。
+建立在那個觀察之上、而且**都是錯的**推論：
 
-**沒做也不建議做**：調大 `SPAWN_RETRY_LIMIT`。第一次重試就會成功，加大沒有意義。
+| 當時的結論 | 實際 |
+|---|---|
+| 「它是暫時性的，第一次重試就會成功」 | 不是。日誌裡 159 次失敗只換到 24 次重試，而且 A/B 對照下帶 `env` 是 100% 失敗 |
+| 「只有無 console 的 GUI 行程會遇到」 | 不是。有 console 的 host 一樣 8/8 失敗。`py` / `pyw` 的差別在時序，不在 console |
+| 「縮圖一直是好的」 | 不是。130 筆 `overlay-add: could not open or map ...thumbfast.out<pid>.bgra` —— helper 沒起來，圖檔不存在 |
+| 「調大 `SPAWN_RETRY_LIMIT` 沒有意義」 | 理由錯了（不是「第一次重試就會成功」），但結論碰巧對：真正的修法不在重試次數 |
+
+**當時為什麼會被騙過去**：v1.1.2 的驗證方法是「把 `mpv_path` 指向一個啟動不了的檔案，看到兩次靜默重試然後一次錯誤」。那個方法**無法區分**「預算正確地為一個真的壞路徑用盡」和「預算對暫時性失敗永遠回不來」—— 兩者看起來一模一樣。
+
+**處置**：v1.1.3 移除了那個五秒紅字橫幅（`mpv-runtime/scripts/thumbfast.lua`，三處 `show-text`），失敗只寫進 `debug.log`。那件事本身仍然是對的 —— 只是它治的是症狀。
+
+#### 根因與修法（v1.1.5）
+
+**是 `env` 參數。** thumbfast 的 `subprocess()` 包裝一直傳 `env = "PATH="..os.getenv("PATH")`。在 Windows 上，只要帶 `env` 而且呼叫密集，mpv 的 subprocess 實作就會拒絕建立行程。
+
+量法：對 `C:\mpv` 的 libmpv host 用 raw JSON IPC 直接發 `subprocess` 指令（避開 §5 講的 python-mpv 序列化陷阱），同一條指令重複 8 次 ——
+
+```
+--- 背靠背，中間不停 ---
+8x 不帶 env                            ........      (. = 成功, X = 拒絕)
+8x 帶 env                              XXXXXXXX
+8x 不帶 env（在 env 那輪之後再跑一次）   ........
+--- 中間隔 0.5 秒 ---
+8x 帶 env，隔 0.5 秒                    ........
+8x 不帶 env，隔 0.5 秒                  ........
+```
+
+密集度是另一半變因，這也解釋了為什麼日誌裡的失敗永遠是**一整串**（02:11:32.309 / .327 / .651 / .657 / .663 / 33.739 / 33.745 / 33.850）—— 滑鼠掃過側邊欄就是 burst。
+
+**修法**：`mpv-runtime/scripts/thumbfast.lua` 的 `subprocess()` 拿掉 `env`。`CreateProcessW` 的 `lpEnvironment` 傳 NULL 時子行程直接繼承父行程的環境，PATH 本來就在；thumbfast 傳它只是為了讓 POSIX 上裸 `mpv` 能在 PATH 上解析，而這裡 `mpv_path` 是絕對路徑。
+
+**端到端驗證**（AX Player 形狀的 host：嵌入 libmpv、無 console、`config_dir=C:\mpv`、真實檔案播放中、連發 12 次 thumbfast 的 `thumb` script-message）：
+
+| | helper `mpv.exe` | 縮圖輸出 | `create failed` |
+|---|---|---|---|
+| 不帶 `env` | 1 | `thumbfast.out41868.bgra` **90,400 bytes** | **0** |
+| 帶 `env`（把 `env` 加回去的對照組） | 4 個都沒真的起來 | 無 | 7 |
+
+**順帶修掉的獨立缺陷**：重試預算原本是 module-level 的 `spawn_retries`，而歸零只寫在「**已 spawn 的** helper 正常退出」那個分支裡。thumbfast 的 helper 是長駐行程，所以在「從頭到尾沒 spawn 成功過」的 session 裡預算永遠回不來 —— 前兩次失敗之後每次 hover 都直接報錯不重試。現在改成把 `retries` 當參數傳給 `spawn()`，每次新的 spawn 都有完整預算。
 
 ### 1.2 「從檔案總管啟動時完全不寫 debug.log」—— 不存在，是量錯了
 
@@ -82,6 +119,14 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 | v1.1.2 | 還原 `spawn_first`，改為在 thumbfast 內重試兩次 |
 | v1.1.3 | 移除 thumbfast 的 OSD 錯誤橫幅（見 1.1） |
 | v1.1.4 | 全專案檢查，修六個既有問題（見下） |
+| v1.1.5 | **thumbfast 根因** —— `subprocess` 的 `env` 參數（見 §1.1）；另修三個既有問題（見下） |
+
+**v1.1.5 修的四件事**：
+
+1. **`thumbfast: cannot create mpv subprocess` 的真正原因是 `env`** —— 見 §1.1。同時把重試預算從 module-level 計數器改成 `spawn()` 的參數，原本的歸零只寫在「已 spawn 的 helper 正常退出」分支，helper 從沒起來過的 session 預算永遠回不來。
+2. **遞迴模式下點子目錄的影片，整個媒體庫被換成那個子目錄。** `play()` 用「是不是開啟資料夾的直接子檔案」判斷，開了「含子資料夾」之後每個子目錄裡的檔案都不符合，於是每次點擊都走 `open_folder(video.parent)` 重新 re-root（`last_folder` 也跟著改）。改判「在不在目前的 `_playlist` 裡」。
+3. **contact sheet 被 LRU 淘汰後永遠不再產生。** `_requested_sheets` 只加不刪，快取檔被 `prune_cache` 刪掉之後，快取查詢落空、in-flight 檢查又提早 return，popup 永遠停在「正在產生預覽…」。改成完成時 discard。（`_requested_thumbs` 刻意不比照辦理：縮圖是 delegate 的 paint 觸發的，discard 會讓壞檔每次重繪都重排一次；sheet 只由 hover 觸發，前面還有 350ms 的 intent 延遲。）
+4. **抓幀逾時仍可能把少格的 sheet 永久快取。** v1.1.4 只堵了「檔案還沒寫完就被讀」這一條，`_grab_evenly_spaced` 撞到 `GRAB_TIMEOUT` 時會回傳已完成的部分。現在只要短少就改走逐幀 fallback（順便修掉 fallback 缺格時時間戳會錯位的問題）。
 
 **v1.1.4 修的六件事**（都在 v1.1.3 踩得到）：
 
@@ -104,6 +149,13 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 | v1.4.1 | 輸出幀率改讀 `estimated-vf-fps` |
 | v1.4.2 | 切換倍率/模型時不再重複查詢屬性 |
 | v1.4.3 | 全專案檢查，修五個既有問題（見下） |
+| v1.4.4 | 三個既有問題（見下） |
+
+**v1.4.4 修的三件事**：
+
+1. **`.vpy` 改成原子寫入。** mpv **每次 seek 都重讀** `fluid_rife.vpy`，而 `apply()` 每次設定變更都重寫它 —— 這是這個程式寫的檔案裡被讀取頻率最高的一個。就地寫入留下一個「mpv 讀到半截腳本」的窗口，而 mpv 對此只會說 `could not init VS`，補幀就這樣無聲停掉。
+2. **`config.json` 改成原子寫入。** 寫到一半被中斷會留下截斷的 JSON，`load_settings` 的 `JSONDecodeError` 防護會把它讀成「沒有設定」，**靜默回到出廠預設**。`set_enabled()` 每次切換都寫一次，這個窗口不是假想的。
+3. **`python312.dll` 不再寫死。** 這個檢查算在 `core_ok` 裡，所以任何內嵌其他版本 CPython 的 mpv 樹都會被判「尚未就緒」、完全拒絕補幀，而錯誤訊息指向 Python 而不是那個版本釘選。改成 glob `python3*.dll`。版本釘選屬於 `install_vapoursynth`（R70 wheel 是 cp312），不屬於就緒判定。
 
 **v1.4.3 修的五件事**：
 
@@ -113,7 +165,9 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 4. **單一實例判定**改用 `WinDLL(..., use_last_error=True)`。
 5. **設定目錄是磁碟根目錄時產生的 .vpy 無法編譯**（raw string 不能以反斜線結尾）。改用 `as_posix()`。
 
-測試：`py -3.10 -m pytest` 在 `C:\projects\Fluid_Motion_Player`，**128 passed**（v1.4.3 新增 5 個回歸測試）。AX Player 沒有測試框架。
+測試：`py -3.10 -m pytest` 在 `C:\projects\Fluid_Motion_Player`，**133 passed**（v1.4.3 新增 5 個、v1.4.4 再新增 5 個回歸測試）。AX Player 沒有測試框架。
+
+v1.4.4 那 5 個測試都確認過會對修補前的程式失敗 —— 特別是原子寫入那兩個：斷言「例外之後舊檔還在」是不夠的，例外在寫入開始前丟出時就地寫入的版本也會過，所以測的是**內容被寫到哪裡**（暫存 sibling 再 `os.replace`，而不是目的檔本身）。
 
 ---
 
@@ -173,14 +227,17 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 
 ### 關於 `thumbfast: cannot create mpv subprocess`
 
+**已在 v1.1.5 結案（見 §1.1），根因是 `env` 參數。** 下表保留當初排除掉的假設，其中最後兩列**當時的理由是錯的**，一併標出來免得再被引用。
+
 | 假設 | 為什麼排除 |
 |---|---|
-| GPU 解碼資源被佔滿 | 30 個 mpv 同時抓幀，thumbfast 式啟動 **0/6 失敗** |
+| GPU 解碼資源被佔滿 | 30 個 mpv 同時抓幀，thumbfast 式啟動 **0/6 失敗**（那些是 Python 的 `subprocess.run`，不帶 `env`，所以本來就不會失敗） |
 | 快速重啟搶不到具名管道 | 共用同一 socket 連續啟動 **10/10 成功** |
 | 路徑被 script-opts 切壞 | hook 到的 cmdline 完整正確，檔案存在 |
-| `spawn_first=yes` 可以解決 | **反而讓冷啟動更糟**，已還原 |
+| `spawn_first=yes` 可以解決 | 確實不能解決，但**理由是錯的** —— 冷啟動不是變因，密集度才是 |
 | 「其實是假陽性，子行程有啟動」 | `CreateProcessW` 回 FALSE / err 87，系統上沒有對應行程 |
-| 重試次數不夠 | 第一次重試就成功；三次全失敗時下一次 hover 也會再試 |
+| 「只有無 console 的 GUI 行程會遇到」 | ~~最小重現 `py` 成功 / `pyw` 失敗~~ —— **不成立**，有 console 的 host 帶 `env` 一樣 8/8 失敗，那組對照差在時序 |
+| 重試次數不夠 | ~~第一次重試就成功~~ —— **不成立**，A/B 對照下帶 `env` 是 100% 失敗，重試再多也沒用。結論（別調 `SPAWN_RETRY_LIMIT`）碰巧是對的 |
 
 ### 關於效能
 
@@ -196,10 +253,13 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 ## 5. 給接手者的方法論提醒
 
 1. **選對指標。** 量「總時間」而忽略「畫面多久出現」，導致 v1.2.0 的 seek 退步；量 `playrate` 而忽略掉幀率，導致把掉 9.6% 幀的設定判成「跟得上」。
-2. **測量工具本身會騙人。** 這一輪至少五次得到無效數據，最貴的一次是 1.2 節那個不存在的問題 —— **在 Windows 上用檔案大小判斷「有沒有寫入」是不可靠的**，要讀內容。另外 python-mpv 的 `command("subprocess", args=[...])` 會把 list 序列化成字串塞進 argv[0]，用它做的 subprocess 實驗全部無效（真正的重現要讓 thumbfast 自己去 spawn）。
+2. **測量工具本身會騙人。** 這一輪至少五次得到無效數據，最貴的一次是 1.2 節那個不存在的問題 —— **在 Windows 上用檔案大小判斷「有沒有寫入」是不可靠的**，要讀內容。另外 python-mpv 的 `command("subprocess", args=[...])` 會把 list 序列化成字串塞進 argv[0]，用它做的 subprocess 實驗全部無效 —— 但**不必**因此只能讓 thumbfast 自己去 spawn：直接對 libmpv 的具名管道寫 raw JSON（`{"command": {"name": "subprocess", "args": [...], "env": [...]}}`）就繞過了那個 binding，而且可以逐一控制參數。v1.1.5 的根因就是這樣隔離出來的。
 3. **間歇性問題不能用單次觀察下結論。** v1.1.1 就是憑一次「沒出現」就發版，然後被推翻。
 4. **修好之後要驗證它真的會執行。** thumbfast 重試的第一版條件寫成 `success == false`，語法正確、載入正常，但**永遠不會觸發**。
 5. **要看 mpv 內部到底做了什麼，可以 hook libmpv 的 IAT。** 這一輪就是這樣拿到 `CreateProcessW` 的真實回傳值和 `GetLastError` 的。做法：解析已載入模組的 import table，`VirtualProtect` 後改寫該 slot 指向 `ctypes.WINFUNCTYPE` 包出來的 Python 函式，轉呼叫原函式並記錄。
+6. **一個正確的觀測，接上錯誤的解釋，比沒有觀測更貴。** IAT hook 量到的 `err 87` 完全正確，錯的是建立在它上面的那一串推論（暫時性、console、縮圖正常），而那串推論後來被寫進 HANDOFF、README 和原始碼註解，變成三個地方都要改。**觀測寫下來，解釋標成假設。**
+7. **A/B 對照要能區分兩種失敗模式，否則等於沒測。** v1.1.2 拿「指向一個啟動不了的檔案」驗證重試，看到「兩次靜默重試然後報錯」就收工 —— 但那個畫面同時符合「預算正確用盡」和「預算永遠回不來」。要區分就得讓**只有被測的那一個變因**改變（後來的做法：同一個 host、同一段 burst，只差 `env` 有沒有傳）。
+8. **原子寫入的測試不能只斷言「例外之後舊檔還在」。** 例外在寫入開始前丟出時，就地寫入的版本也會通過。要測的是**內容被寫到哪裡** —— 攔 `Path.write_text`，斷言它拿到的不是目的檔。`tests/test_config_runtime.py` 的 `_writes_land_on()` 就是幹這個的。
 
 ---
 
@@ -217,8 +277,33 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 
 ## 7. 建議的下一步
 
-沒有已知的未解問題。真的要繼續的話，這些是檢查時看到、但判斷不值得現在動的：
+沒有已知的未解問題。
+
+### 還沒做、但已經查證過是真的（依「使用者會不會踩到 ÷ 修起來多大」排序）
+
+1. **`debug.log` 沒有上限也沒有輪替。** v1.1.5 之前有 4083 行、其中 1275 行是 thumbfast 刷屏；根因修掉之後成長會慢很多，但上限仍然該加。
+2. **`roaming_dir()` 每次呼叫都 `mkdir(exist_ok=True)`，而 `_hotkey_loop` 每 0.05 秒呼叫一次** —— 每秒 20 次多餘的 `CreateDirectoryW`，永遠。加 `lru_cache` 是一行。
+3. **`snapshot_playback()` 把 `vf` 讀了兩次**（`interpolation_active()` 一次、`current_filters()` 一次），每個 player 每 0.3 秒。跟 v1.4.2（`8477790`）同方向、更便宜的一刀。
+4. **`Sidebar.set_playing()` 對每一列都 `setData()`** —— 一千個檔案就是一千次重繪，每次換檔跑一遍。只需要動舊的和新的兩列。
+5. **`iter_mpv_processes()` 每 0.3 秒 `os.listdir(\.\pipe\)`**（列舉全系統具名管道）。v1.4.3 降頻了 engine-cache / `diagnose()` / GPU 快照，唯獨漏了這條，而它其實是四者裡最貴的。
+6. **Fluid Motion 的 UI 每 0.9 秒 `get_state()`，藏在系統匣時照跑**（`ui/app.js`）—— 而常駐系統匣正是這個程式的常態。加 `visibilitychange` 判斷。
+7. **`%APPDATA%\FluidMotion\downloads` 數 GB 的安裝檔裝完永遠不清**，UI 上只有「清除 engine 快取」。
+8. **contact sheet 的 `sheet.save()` 不是原子的** —— 同一支檔案裡 thumbnail 走的是 `produced.replace(dest)`（原子），純粹是不一致。
+
+### 查過、判斷不值得動
 
 1. **`probe_duration` 的結果沒有快取。** sheet 被 LRU 淘汰後重新產生要重問一次長度。加了 `EAGER_SHEET_LIMIT` 之後量級已經從幾百次降到 12 次，收益很小，而且會多一個要失效的快取檔。
 2. **`EAGER_SHEET_LIMIT = 12` 是拍的，不是量的。** 側欄一列 79px，預設視窗大約看得到 6 列，抓了兩個畫面的量。要調就調數字，不要改成「跟著捲動產生」—— 那會把無上限產生換個地方放回來。
-3. **thumbfast 是 vendored patch。** 日後更新 thumbfast 要重新套用重試與拿掉橫幅這兩處，檔案裡有 `AX Player patch:` 註解標示位置，而且 `mpv-runtime/scripts/` 和 `C:\mpv\scripts\` 兩份都要改。
+3. **快取的 LRU 依賴 `st_atime`。** 曾懷疑 Windows 預設不更新 atime 會讓它退化成 FIFO —— 實測這台是 `DisableLastAccess = 2 (System Managed, ENABLED)`，atime 確實有更新（thumbnails 的 atime 與 mtime 相差兩天）。**不是問題。**
+4. **`.vpy` 用畫面尺寸猜色彩矩陣**（`est_matrix = 1 if is_hd else 5`），BT.2020 / HDR 片源開補幀會偏色。是真的，但要正確修得從 frame props 讀，而使用者不看 HDR。
+5. **把 IPC 改成 pipeline**（`snapshot_playback` 16 個 round-trip → 1 個，mpv 忙時約省 230ms/tick）。收益真實，但那是 133 個測試圍著的核心路徑，改動面大。先做上面第 3 項就好。
+6. **`fluid_motion` 的死碼**（`enumerate_windows_pipes` / `exit_duplicate` / `fps_fraction_label` / `project_root`）。其中 `debug_log_path()` 是**刻意**留的，`cf33d83` 的 commit message 有寫。
+
+### 還有兩個「知道就好」的環境事實
+
+1. **`player_widget.py` 設的 `input_ipc_server` 不會贏過 `mpvSockets.lua`。** 實測用 `mpv.MPV(input_ipc_server="axtest-con", config_dir=r"C:\mpv")` 起 host，真正建立的管道是 `%TEMP%\mpvSockets\<pid>` —— mpv 在 option 執行期被改時會**重新綁定**，所以後設的贏，`2f6f49c` 想達成的目標其實沒達成。不影響功能：Fluid Motion 的 `6faf4c3` 早就加了 mpvSockets fallback。註解已在 v1.1.5 更正。
+2. **`C:\mpv\scripts\mpvSockets.lua` 每次啟動報錯一次**（`debug.log` 裡 104 筆，cp950 解出來是「命令語法不正確。」）。它跑 `cmd /c mkdir`，路徑組壞了。既然 AX Player 自己設 `input_ipc_server`、`zz-fluid-ipc.lua` 也設，它在這台機器上其實多餘 —— 移掉可同時解決搶綁定和日誌噪音。那是第三方腳本，不在任一 repo 內。
+
+### 維護提醒
+
+**thumbfast 是 vendored patch。** 日後更新 thumbfast 要重新套用三處修改（拿掉 `env`、per-attempt 重試、拿掉 OSD 橫幅），檔案裡有 `AX Player patch:` 註解標示位置，而且 `mpv-runtime/scripts/` 和 `C:\mpv\scripts\` 兩份都要改。
