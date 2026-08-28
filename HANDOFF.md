@@ -25,7 +25,7 @@
 
 **重要**：打包版 AX Player 的 mpv root 解析順序是 `%LOCALAPPDATA%\AXPlayer\mpv-runtime` → `C:\mpv` → `%ProgramFiles%\mpv`。第一個不存在，所以**打包版實際使用 `C:\mpv`**。改 mpv 設定或 lua 要改那裡，不是 repo 的 `mpv-runtime/`（那份是給原始碼版和打包進 exe 的種子用的，兩邊要一起改）。
 
-目前版本：**AX Player v1.1.5**、**Fluid Motion v1.4.4**。（v1.1.4 / v1.4.3 之前的版本都已 commit、push、build、部署、發 release。）
+目前版本：**AX Player v1.1.6**、**Fluid Motion v1.4.5**，都已 commit、push、build、部署、發 release。
 
 ---
 
@@ -120,6 +120,14 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 | v1.1.3 | 移除 thumbfast 的 OSD 錯誤橫幅（見 1.1） |
 | v1.1.4 | 全專案檢查，修六個既有問題（見下） |
 | v1.1.5 | **thumbfast 根因** —— `subprocess` 的 `env` 參數（見 §1.1）；另修三個既有問題（見下） |
+| v1.1.6 | 快取寫入不會被中斷弄壞；清掉舊版留下的垃圾（見下） |
+
+**v1.1.6 修的四件事**：
+
+1. **contact sheet 改成先寫暫存檔再改名。** 直接寫目的檔會留下一個「半張 JPEG」的窗口，而它通過 `is_file() and st_size > 0` 檢查，之後**每次 hover 都是那張壞圖** —— 沒有東西會重訪已存在的 sheet。同檔案的 thumbnail 早就是這樣寫的，這是兩個專案裡最後一個沒改的寫入點。
+2. **`debug.log` 1 MB 輪替，保留一代。** 它只會長：mpv 的 warn/error 全進來，一個吵的腳本一個 session 就能加幾千行（thumbfast 那件事貢獻了 1275 行）。不設上限等於自我否定 —— 它是 `console=False` 建置**唯一**的診斷管道，沒人會為了找一行去讀 50 MB。
+3. **清掉被遺棄的暫存目錄。** 抓幀器自己會在 `finally` 清，但行程被砍就清不掉，而 `prune_cache` 只看檔案 —— 那些東西對大小上限和淘汰**都是隱形的**。實測快取裡躺著 8 個、48 個孤兒幀。只刪超過一小時的（對照抓幀本身的 30 秒 `GRAB_TIMEOUT`）。
+4. **刪掉舊 grid 尺寸的 sheet。** 檔名帶格數，而查詢只問當前格數，所以 4×3 時代留下的 `_12.jpg` 永遠讀不到，只是佔著大小上限等 LRU 掃到。實測還有 19 個。
 
 **v1.1.5 修的四件事**：
 
@@ -150,6 +158,16 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 | v1.4.2 | 切換倍率/模型時不再重複查詢屬性 |
 | v1.4.3 | 全專案檢查，修五個既有問題（見下） |
 | v1.4.4 | 三個既有問題（見下） |
+| v1.4.5 | 多播放器身分混淆（四件），外加兩個小的（見下） |
+
+**v1.4.5 修的六件事**（前四件只有同時開兩個播放器才踩得到，這也是它們活這麼久的原因；v1.4.3 修的 pid 子字串誤配是同一家族的第一個）：
+
+1. **seek 的 hold-off 改成逐播放器。** 原本是一個共用檔：每個 mpv 的 lua 都碰它、每個 player 的 tick 都讀它，所以**在一個播放器上 seek 會把其他所有播放器的濾鏡都拆掉**，還一起等 debounce。兩邊都改成帶 pid，lua 另外在 shutdown 清掉，啟動時掃掉孤兒與舊的共用檔名。
+2. **不帶 pid 的管道名，在有兩個以上播放器時不再嘗試。** `\.\pipe\mpvpipe` / `mpvsocket` 對「mpv.conf 寫死 input-ipc-server」的人是唯一入口，所以單一播放器時照試；但兩個播放器時它們是錯的 —— 兩個 pid 解析到同一條管道，濾鏡對其中一個套兩次、另一個完全沒碰到。`tick()` 看到超過一個播放器就傳 `allow_ambiguous=False`。
+3. **存起來的 hwdec 改用 pid 當 key。** `ipc.path` 不是身分：沒有乾淨 `remove()` 就退出的播放器會留下條目，下一個拿到同名管道的播放器會被還原成**別人的**舊模式。`apply()` / `remove()` 現在收 pid，`tick()` 的死 pid 清掃順手忘掉離線的播放器。
+4. **就緒檢查移出逐播放器迴圈。** 原本在迴圈裡，所以沒有任何播放器連線時迴圈根本不跑：開關翻了、設定存了，**UI 什麼都不說** —— 而這是新裝機器第一個會遇到的狀況。它還是從迴圈裡 `return`，順帶跳過結尾的 `tick()`。
+5. **`snapshot_playback` 的 `vf` 只讀一次**（原本 `interpolation_active()` 和 `current_filters()` 各讀一次）。
+6. **UI 藏在系統匣時停止輪詢**，回到前景時立刻刷新一次。
 
 **v1.4.4 修的三件事**：
 
@@ -165,7 +183,7 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 4. **單一實例判定**改用 `WinDLL(..., use_last_error=True)`。
 5. **設定目錄是磁碟根目錄時產生的 .vpy 無法編譯**（raw string 不能以反斜線結尾）。改用 `as_posix()`。
 
-測試：`py -3.10 -m pytest` 在 `C:\projects\Fluid_Motion_Player`，**133 passed**（v1.4.3 新增 5 個、v1.4.4 再新增 5 個回歸測試）。AX Player 沒有測試框架。
+測試：`py -3.10 -m pytest` 在 `C:\projects\Fluid_Motion_Player`，**140 passed**（v1.4.3 / v1.4.4 / v1.4.5 各新增 5、5、7 個回歸測試）。AX Player 沒有測試框架，改動用一次性腳本驗證。
 
 v1.4.4 那 5 個測試都確認過會對修補前的程式失敗 —— 特別是原子寫入那兩個：斷言「例外之後舊檔還在」是不夠的，例外在寫入開始前丟出時就地寫入的版本也會過，所以測的是**內容被寫到哪裡**（暫存 sibling 再 `os.replace`，而不是目的檔本身）。
 
@@ -260,6 +278,8 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 6. **一個正確的觀測，接上錯誤的解釋，比沒有觀測更貴。** IAT hook 量到的 `err 87` 完全正確，錯的是建立在它上面的那一串推論（暫時性、console、縮圖正常），而那串推論後來被寫進 HANDOFF、README 和原始碼註解，變成三個地方都要改。**觀測寫下來，解釋標成假設。**
 7. **A/B 對照要能區分兩種失敗模式，否則等於沒測。** v1.1.2 拿「指向一個啟動不了的檔案」驗證重試，看到「兩次靜默重試然後報錯」就收工 —— 但那個畫面同時符合「預算正確用盡」和「預算永遠回不來」。要區分就得讓**只有被測的那一個變因**改變（後來的做法：同一個 host、同一段 burst，只差 `env` 有沒有傳）。
 8. **原子寫入的測試不能只斷言「例外之後舊檔還在」。** 例外在寫入開始前丟出時，就地寫入的版本也會通過。要測的是**內容被寫到哪裡** —— 攔 `Path.write_text`，斷言它拿到的不是目的檔。`tests/test_config_runtime.py` 的 `_writes_land_on()` 就是幹這個的。
+9. **量，不要憑直覺列效能問題。** §7 有一整張表是我列了、量完全部撤回的。挑出來的那五條沒有一條成立，而真正該修的全是正確性問題。**先量再列。**
+10. **測試自己也會 flaky，而且會裝成產品的 bug。** v1.4.5 有一個回歸測試寫成「剛寫的 seek hold 檔應該讀作 held」—— NTFS 的 mtime 是 100ns、`time.time()` 是 ~15ms，檔案可以讀起來稍微在未來，`0 <= age` 的防護就說「沒有 held」。改成用 `os.utime` 明確蓋時間戳。**看到測試偶爾失敗，先懷疑測試。**
 
 ---
 
@@ -279,16 +299,23 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 
 沒有已知的未解問題。
 
-### 還沒做、但已經查證過是真的（依「使用者會不會踩到 ÷ 修起來多大」排序）
+### 曾列在這裡、v1.1.6 / v1.4.5 已經做完的
 
-1. **`debug.log` 沒有上限也沒有輪替。** v1.1.5 之前有 4083 行、其中 1275 行是 thumbfast 刷屏；根因修掉之後成長會慢很多，但上限仍然該加。
-2. **`roaming_dir()` 每次呼叫都 `mkdir(exist_ok=True)`，而 `_hotkey_loop` 每 0.05 秒呼叫一次** —— 每秒 20 次多餘的 `CreateDirectoryW`，永遠。加 `lru_cache` 是一行。
-3. **`snapshot_playback()` 把 `vf` 讀了兩次**（`interpolation_active()` 一次、`current_filters()` 一次），每個 player 每 0.3 秒。跟 v1.4.2（`8477790`）同方向、更便宜的一刀。
-4. **`Sidebar.set_playing()` 對每一列都 `setData()`** —— 一千個檔案就是一千次重繪，每次換檔跑一遍。只需要動舊的和新的兩列。
-5. **`iter_mpv_processes()` 每 0.3 秒 `os.listdir(\.\pipe\)`**（列舉全系統具名管道）。v1.4.3 降頻了 engine-cache / `diagnose()` / GPU 快照，唯獨漏了這條，而它其實是四者裡最貴的。
-6. **Fluid Motion 的 UI 每 0.9 秒 `get_state()`，藏在系統匣時照跑**（`ui/app.js`）—— 而常駐系統匣正是這個程式的常態。加 `visibilitychange` 判斷。
-7. **`%APPDATA%\FluidMotion\downloads` 數 GB 的安裝檔裝完永遠不清**，UI 上只有「清除 engine 快取」。
-8. **contact sheet 的 `sheet.save()` 不是原子的** —— 同一支檔案裡 thumbnail 走的是 `produced.replace(dest)`（原子），純粹是不一致。
+`debug.log` 輪替、`snapshot_playback` 的 `vf` 只讀一次、UI 藏在系統匣時停止輪詢、contact sheet 原子寫入 —— 都在那兩版裡了。
+
+### 量過之後撤回的「效能問題」
+
+**這幾條是我照直覺列的，量完全部不成立。** 留著是為了不要有人再列一次：
+
+| 當時的說法 | 實測 |
+|---|---|
+| 閒置時每 0.3 秒列舉全系統具名管道，「四者裡最貴的」 | `os.listdir(\.\pipe\)` 在 548 條管道下 **0.76 ms** → 152 ms/分鐘。process scan 0.97 ms → 194 ms/分鐘。閒置 tick 加 housekeeping 總共 **0.41 秒/分鐘 ≈ 單核 0.7%** |
+| `Sidebar.set_playing()` 對每列 `setData()`，「一千個檔案就是一千次重繪」 | 3000 列 **0.48 ms**，而且只在換檔時跑一次 |
+| `_apply_filter()` 每次按鍵掃全部項目，該 debounce | 3000 列每次按鍵 **3.05 ms** |
+| `roaming_dir()` 每秒 20 次多餘 mkdir | 一次 **0.061 ms** → 70 ms/分鐘 |
+| `%APPDATA%\FluidMotion\downloads` 數 GB 永遠不清 | **那個目錄在這台機器上不存在** —— `C:\mpv` 是手工組的，bootstrap 從沒跑過。程式裡是真的，但沒有觀察到 |
+
+`engine_cache.info()` 是單次最貴的（4.76 ms，53 檔 / 0.86 GB），但它跑在 5 秒的閒置節奏上 —— v1.4.3 已經處理過了。
 
 ### 查過、判斷不值得動
 
