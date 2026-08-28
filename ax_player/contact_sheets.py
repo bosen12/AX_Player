@@ -12,6 +12,7 @@ seconds of frame-grabbing.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import time
@@ -39,7 +40,23 @@ _DURATION_RE = re.compile(r"^(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)$", re.MULTILINE
 
 
 def prune_contact_sheet_cache() -> None:
-    prune_cache(contact_sheet_cache_dir())
+    # Sheets from a different grid size can never be read again: the filename
+    # carries the frame count, and cached_sheet_path() only ever asks for the
+    # current one. The 4x3 grid this shipped with before 358704e left a
+    # _12.jpg beside every _9.jpg, which then sat in the cache competing for
+    # the size cap until the LRU happened to reach it.
+    directory = contact_sheet_cache_dir()
+    try:
+        for stale in directory.glob("*.jpg"):
+            suffix = stale.stem.rsplit("_", 1)[-1]
+            if suffix.isdigit() and int(suffix) != FRAME_COUNT:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    prune_cache(directory)
 
 
 def cached_sheet_path(video: Path, frame_count: int = FRAME_COUNT) -> Path:
@@ -342,7 +359,22 @@ def generate_contact_sheet(video: Path, frame_count: int = FRAME_COUNT) -> Path 
         painter.end()
 
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if not sheet.save(str(dest), "JPG", 85):
+        # Written beside the destination and renamed onto it, the same way
+        # thumbnails.py already lands its frame. Saving straight onto dest
+        # leaves a window where a half-written JPEG is on disk -- and it
+        # passes cached_sheet_path()'s "is_file() and st_size > 0" check, so
+        # that broken image is then served for every hover from then on,
+        # since nothing revisits a sheet once it exists.
+        staging = dest.with_name(f".part-{dest.name}")
+        try:
+            if not sheet.save(str(staging), "JPG", 85):
+                return None
+            os.replace(staging, dest)
+        except OSError:
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                pass
             return None
         return dest
     finally:
