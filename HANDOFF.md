@@ -25,7 +25,7 @@
 
 **重要**：打包版 AX Player 的 mpv root 解析順序是 `%LOCALAPPDATA%\AXPlayer\mpv-runtime` → `C:\mpv` → `%ProgramFiles%\mpv`。第一個不存在，所以**打包版實際使用 `C:\mpv`**。改 mpv 設定或 lua 要改那裡，不是 repo 的 `mpv-runtime/`（那份是給原始碼版和打包進 exe 的種子用的，兩邊要一起改）。
 
-目前版本：**AX Player v1.1.7**、**Fluid Motion v1.4.5**，都已 commit、push、build、部署、發 release。
+目前版本：**AX Player v1.1.7**、**Fluid Motion v1.4.6**，都已 commit、push、build、部署、發 release。
 
 ---
 
@@ -160,6 +160,14 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 | v1.4.3 | 全專案檢查，修五個既有問題（見下） |
 | v1.4.4 | 三個既有問題（見下） |
 | v1.4.5 | 多播放器身分混淆（四件），外加兩個小的（見下） |
+| v1.4.6 | code-review 找到 v1.4.5 自己引入的三個問題，外加撤回一個從沒生效的改動 |
+
+**v1.4.6 修的四件事**（**全部來自 v1.4.5 那一次改動本身**，不是舊有缺陷）：
+
+1. **連線失敗的一拍不再忘掉還活著的播放器的 hwdec。** 死 pid 清掃用的是 `live`（這一拍有回應），不是「行程沒了」。其他清掉的東西都救得回來（`_applied` 掉了下一拍重套），唯獨 hwdec 救不回來 —— `ensure_copyback_hwdec` 看到已經是 copy-back 就提早 return，不會重新記錄。所以**一次連不上（mpv 忙著編譯 TensorRT 引擎時管道不回應）就永久失去原始模式**，之後關掉補幀，播放器會**永遠停在 auto-copy**，背著 GPU→CPU 傳輸卻沒有濾鏡 —— 正好是那段註解說要避免的成本。改成對 `iter_mpv_processes` 真的看到的 pid 清掃。
+2. **seek hold 讀不到新檔名時，退回讀 v1.4.5 之前的共用檔名。** `install_lua` 只改磁碟上的檔，**已經在跑的 mpv 記憶體裡還是舊腳本**（mpv 啟動時才載入腳本）。實測 `C:\mpv\scripts\zz-fluid-ipc.lua` 當時仍是舊的共用名，而 watcher 找 `seek_hold-<pid>` —— 那個播放器的 hold 永遠找不到，0.15 秒的 debounce 消失，mpv 一清掉 `seeking` 下一拍就重套濾鏡，拖進度條時每個間隔都重建一次管道。
+3. **啟動時的清掃不再刪掉還在用的 hold。** 原本不看時間全刪，所以在別人拖進度條的當下啟動，會刪掉人家剛寫的 hold，第一拍就可能把濾鏡套進 seek 中間。改成只刪超過 `SEEK_HOLD_MAX_AGE` 的。
+4. **撤回 UI 的輪詢 gate。** v1.4.5 用 `document.hidden` 擋住 0.9 秒的輪詢 —— **那個判斷從來沒有成立過**：pywebview 的 `hide()` 只藏原生視窗，不會通知 WebView2 的 document。實測 100ms 計數器在 `hide()` 前後與 `show()` 之後都回報 `hidden=false` / `visibilityState="visible"`，而且一直在跑。從 Python 端驅動做得到，但閒置的 `get_state()` 實測 **0.200 ms**，整個節省是 **13.4 ms/分鐘** —— 比撤回其他效能項時的數字還小一個數量級。所以是移除，不是重做。
 
 **v1.4.5 修的六件事**（前四件只有同時開兩個播放器才踩得到，這也是它們活這麼久的原因；v1.4.3 修的 pid 子字串誤配是同一家族的第一個）：
 
@@ -168,7 +176,7 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 3. **存起來的 hwdec 改用 pid 當 key。** `ipc.path` 不是身分：沒有乾淨 `remove()` 就退出的播放器會留下條目，下一個拿到同名管道的播放器會被還原成**別人的**舊模式。`apply()` / `remove()` 現在收 pid，`tick()` 的死 pid 清掃順手忘掉離線的播放器。
 4. **就緒檢查移出逐播放器迴圈。** 原本在迴圈裡，所以沒有任何播放器連線時迴圈根本不跑：開關翻了、設定存了，**UI 什麼都不說** —— 而這是新裝機器第一個會遇到的狀況。它還是從迴圈裡 `return`，順帶跳過結尾的 `tick()`。
 5. **`snapshot_playback` 的 `vf` 只讀一次**（原本 `interpolation_active()` 和 `current_filters()` 各讀一次）。
-6. **UI 藏在系統匣時停止輪詢**，回到前景時立刻刷新一次。
+6. ~~**UI 藏在系統匣時停止輪詢**~~ —— **v1.4.6 撤回，那個 gate 從來沒有生效過**（見下）。
 
 **v1.4.4 修的三件事**：
 
@@ -184,7 +192,7 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 4. **單一實例判定**改用 `WinDLL(..., use_last_error=True)`。
 5. **設定目錄是磁碟根目錄時產生的 .vpy 無法編譯**（raw string 不能以反斜線結尾）。改用 `as_posix()`。
 
-測試：`py -3.10 -m pytest` 在 `C:\projects\Fluid_Motion_Player`，**140 passed**（v1.4.3 / v1.4.4 / v1.4.5 各新增 5、5、7 個回歸測試）。AX Player 沒有測試框架，改動用一次性腳本驗證。
+測試：`py -3.10 -m pytest` 在 `C:\projects\Fluid_Motion_Player`，**144 passed**（v1.4.3 / v1.4.4 / v1.4.5 / v1.4.6 各新增 5、5、7、4 個回歸測試）。AX Player 沒有測試框架，改動用一次性腳本驗證。
 
 v1.4.4 那 5 個測試都確認過會對修補前的程式失敗 —— 特別是原子寫入那兩個：斷言「例外之後舊檔還在」是不夠的，例外在寫入開始前丟出時就地寫入的版本也會過，所以測的是**內容被寫到哪裡**（暫存 sibling 再 `os.replace`，而不是目的檔本身）。
 
@@ -281,7 +289,9 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 8. **原子寫入的測試不能只斷言「例外之後舊檔還在」。** 例外在寫入開始前丟出時，就地寫入的版本也會通過。要測的是**內容被寫到哪裡** —— 攔 `Path.write_text`，斷言它拿到的不是目的檔。`tests/test_config_runtime.py` 的 `_writes_land_on()` 就是幹這個的。
 9. **量，不要憑直覺列效能問題。** §7 有一整張表是我列了、量完全部撤回的。挑出來的那五條沒有一條成立，而真正該修的全是正確性問題。**先量再列。**
 10. **撤回要跟主張一樣嚴謹。** `.part-` 那條我先誇大（說會累積），被質疑後又**錯誤撤回**（理由是「窗口只有 1.33 毫秒」）—— 兩次都沒讀清楚自己寫的錯誤處理。真正的觸發條件是一條普通的錯誤返回路徑。**推翻一個發現，跟提出它一樣需要證據。**
-11. **修法也要量，不只量問題。** 關閉噴錯的直覺解法（`waitForDone()`）會把一行日誌換成 30 秒的關閉凍結。量了才知道要改用「clear + 守住 emit」。
+11. **宣稱「已修」之前要確認它真的會生效。** v1.4.5 的 UI 輪詢 gate 依賴 `document.hidden`，而 pywebview 隱藏視窗時那個值不會變 —— 沒有驗證就寫進了 commit、release notes 和這份文件三個地方。跟 thumbfast 那件事同一個形狀：**觀測沒做，結論先寫**。
+12. **review 自己寫的程式碼，命中率會比 review 舊碼高很多。** `/code-review` 掃 `ax_player`（大多是舊碼）五個裡兩個不成立；掃剛改完的 `fluid_motion` 四個裡三個是真的，而且全部來自那次改動本身。**改完就審，趁還記得為什麼那樣寫。**
+13. **修法也要量，不只量問題。** 關閉噴錯的直覺解法（`waitForDone()`）會把一行日誌換成 30 秒的關閉凍結。量了才知道要改用「clear + 守住 emit」。
 12. **測試自己也會 flaky，而且會裝成產品的 bug。** v1.4.5 有一個回歸測試寫成「剛寫的 seek hold 檔應該讀作 held」—— NTFS 的 mtime 是 100ns、`time.time()` 是 ~15ms，檔案可以讀起來稍微在未來，`0 <= age` 的防護就說「沒有 held」。改成用 `os.utime` 明確蓋時間戳。**看到測試偶爾失敗，先懷疑測試。**
 
 ---
