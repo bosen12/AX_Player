@@ -1,0 +1,4 @@
+# Test-only. The app itself needs nothing beyond requirements.txt.
+#   py -3.10 -m pip install -r requirements.txt -r requirements-dev.txt
+#   py -3.10 -m pytest
+pytest>=8.0

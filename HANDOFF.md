@@ -25,7 +25,7 @@
 
 **重要**：打包版 AX Player 的 mpv root 解析順序是 `%LOCALAPPDATA%\AXPlayer\mpv-runtime` → `C:\mpv` → `%ProgramFiles%\mpv`。第一個不存在，所以**打包版實際使用 `C:\mpv`**。改 mpv 設定或 lua 要改那裡，不是 repo 的 `mpv-runtime/`（那份是給原始碼版和打包進 exe 的種子用的，兩邊要一起改）。
 
-目前版本：**AX Player v1.1.7**、**Fluid Motion v1.4.6**，都已 commit、push、build、部署、發 release。
+目前版本：**AX Player v1.1.8**、**Fluid Motion v1.4.6**，都已 commit、push、build、部署、發 release。
 
 ---
 
@@ -122,6 +122,7 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 | v1.1.5 | **thumbfast 根因** —— `subprocess` 的 `env` 參數（見 §1.1）；另修三個既有問題（見下） |
 | v1.1.6 | 快取寫入不會被中斷弄壞；清掉舊版留下的垃圾（見下） |
 | v1.1.7 | code-review 找到的三個（見 §7）；另兩個量完撤回 |
+| v1.1.8 | 補上測試框架（15 個，涵蓋 v1.1.5–v1.1.7 的修正） |
 
 **v1.1.6 修的四件事**：
 
@@ -192,7 +193,9 @@ $after  = ([System.IO.File]::ReadAllText($p) -split "`n").Count
 4. **單一實例判定**改用 `WinDLL(..., use_last_error=True)`。
 5. **設定目錄是磁碟根目錄時產生的 .vpy 無法編譯**（raw string 不能以反斜線結尾）。改用 `as_posix()`。
 
-測試：`py -3.10 -m pytest` 在 `C:\projects\Fluid_Motion_Player`，**144 passed**（v1.4.3 / v1.4.4 / v1.4.5 / v1.4.6 各新增 5、5、7、4 個回歸測試）。AX Player 沒有測試框架，改動用一次性腳本驗證。
+測試：`py -3.10 -m pytest` 在 `C:\projects\Fluid_Motion_Player`，**144 passed**（v1.4.3 / v1.4.4 / v1.4.5 / v1.4.6 各新增 5、5、7、4 個回歸測試）。AX Player 從 v1.1.8 起也有了：`py -3.10 -m pytest` 在 `C:\projects\AX_Player`，**15 passed**（0.2 秒）。裝依賴用 `requirements-dev.txt`。
+
+`tests/conftest.py` 會把 `LOCALAPPDATA` 導向 tmp_path 並重設三個模組級快取（`debug_log._log_path`、`settings._store`、`resume._cache`）—— **沒有它，跑測試會 prune 掉跑測試的人自己的快取**。今天手動驗證時就污染過真實快取兩次、共 80 筆死資料要手動找出來刪。Fluid Motion 的 conftest 也是因為同樣的事才存在的。
 
 v1.4.4 那 5 個測試都確認過會對修補前的程式失敗 —— 特別是原子寫入那兩個：斷言「例外之後舊檔還在」是不夠的，例外在寫入開始前丟出時就地寫入的版本也會過，所以測的是**內容被寫到哪裡**（暫存 sibling 再 `os.replace`，而不是目的檔本身）。
 
