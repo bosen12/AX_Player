@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AX Player — 把 mpv 裝進一個真正的視窗</title>
+<meta name="description" content="把 mpv 直接嵌入視窗的桌面播放器。播放全部交給 mpv 自己的 uosc 和 thumbfast，這裡只補上 mpv 沒有的：資料夾片庫和視窗殼。Windows / 開源 / MIT。" />
+<meta property="og:title" content="AX Player" />
+<meta property="og:description" content="把 mpv 裝進一個真正的視窗。片庫是這裡加的，播放是 mpv 自己的。" />
+<meta property="og:type" content="website" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;500;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;900&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="tokens.css" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<a class="skip" href="#main">跳到主要內容</a>
+
+<!-- N3 · side rail: the film perforation the app draws down its own sidebar -->
+<nav class="rail" aria-label="章節">
+  <span class="rail__mark">AX</span>
+  <ul class="rail__dots">
+    <li><a href="#main" data-rail="main"><span class="rail__perf"></span><span class="rail__label">開場</span></a></li>
+    <li><a href="#library" data-rail="library"><span class="rail__perf"></span><span class="rail__label">片庫</span></a></li>
+    <li><a href="#playback" data-rail="playback"><span class="rail__perf"></span><span class="rail__label">播放</span></a></li>
+    <li><a href="#measured" data-rail="measured"><span class="rail__perf"></span><span class="rail__label">數字</span></a></li>
+    <li><a href="#get" data-rail="get"><span class="rail__perf"></span><span class="rail__label">下載</span></a></li>
+  </ul>
+</nav>
+
+<div class="shell">
+
+  <header class="topbar">
+    <span class="wordmark"><span class="bulb" aria-hidden="true"></span>AX&nbsp;PLAYER</span>
+    <span class="topbar__ver" id="ver-chip">v1.1.9</span>
+    <a class="topbar__link" href="https://github.com/bosen12/AX_Player">原始碼</a>
+  </header>
+
+  <!-- H2 · split diptych -->
+  <main id="main">
+  <section class="hero">
+    <div class="hero__say">
+      <h1 class="hero__h">把 mpv 裝進<br />一個真正的視窗</h1>
+      <p class="hero__lede">
+        進度條、縮圖預覽、快捷鍵、字幕與音軌切換 —— 全部交給嵌入的 mpv 自己處理。
+        這個專案刻意不重做 mpv 已經做得很好的事，只補上它本來沒有的兩塊：
+        <strong>資料夾片庫</strong>和<strong>視窗殼</strong>。
+      </p>
+      <div class="hero__acts">
+        <a class="btn btn--solid" href="https://github.com/bosen12/AX_Player/releases/latest">下載最新版</a>
+        <a class="btn btn--ghost" href="#library">先看它長什麼樣</a>
+      </div>
+      <p class="hero__meta">
+        Windows 10/11 · MIT 授權 · 不內建 mpv（首次啟動會自動取得）
+      </p>
+    </div>
+
+    <!-- Signature: the library interaction, rebuilt. Tier-A CSS art. -->
+    <div class="hero__demo">
+      <div class="demo" id="demo">
+        <div class="demo__head">
+          <span class="demo__title">互動示範 · 側邊欄片庫</span>
+          <span class="demo__hint" id="demo-hint">停在一列上不動 350ms</span>
+        </div>
+        <ul class="lib" id="lib" role="listbox" aria-label="示範播放清單">
+          <!-- rows injected by app.js -->
+        </ul>
+        <div class="sheet" id="sheet">
+          <p class="sheet__idle" id="sheet-idle">停在任何一列上，九宮格預覽會出現在這裡</p>
+          <div class="sheet__grid" id="sheet-grid" hidden></div>
+          <p class="sheet__cap" id="sheet-cap"></p>
+        </div>
+      </div>
+      <p class="demo__foot">
+        真實的 hover-intent 延遲就是 <code>350ms</code>，contact sheet 就是 3×3 九宮格 ——
+        數字取自 <code>ui.py</code> 與 <code>contact_sheets.py</code>，不是示意。
+      </p>
+    </div>
+  </section>
+
+  <!-- Feature Stack · section 1 -->
+  <section class="stack" id="library">
+    <div class="stack__pin">
+      <p class="stack__kicker">片庫</p>
+      <h2 class="stack__h">mpv 沒有的那一半</h2>
+      <p class="stack__note">
+        mpv 是一次開一個檔案的播放器。要瀏覽一整個資料夾、記得看到哪、
+        一眼看出哪些看過了 —— 這些它不做，所以這裡做。
+      </p>
+      <a class="btn btn--ghost btn--sm" href="#get">下載</a>
+    </div>
+    <div class="stack__run">
+      <article class="panel">
+        <h3 class="panel__h">縮圖與懸停預覽</h3>
+        <p>每一列一張縮圖，滑鼠停住就跳出九宮格 contact sheet，涵蓋整部片的 4%–96%。九張幀由 <em>單一個</em> mpv 行程用 <code>--sstep</code> 走完。</p>
+        <p class="panel__num"><span class="num">1.04</span><span class="unit">秒 / 張</span><span class="was">先前一張要 4.54 秒</span></p>
+      </article>
+      <article class="panel">
+        <h3 class="panel__h">進度與已看完</h3>
+        <p>播到哪就記到哪，看完 95% 打上勾。可以只列還沒看完的。這只是給眼睛看的標記 —— 真正的續播位置是 mpv 自己的 watch-later 在管。</p>
+      </article>
+      <article class="panel">
+        <h3 class="panel__h">搜尋、排序、含子資料夾</h3>
+        <p>檔名即時篩選；依檔名／修改日期／檔案大小排序。開了「含子資料夾」，整棵樹都會列進來，而且點哪一部都不會把片庫改根。</p>
+      </article>
+      <article class="panel">
+        <h3 class="panel__h">快取有上限</h3>
+        <p>縮圖與 contact sheet 各自 500 MiB 封頂，超過就淘汰最久沒被讀取的。裝再久也不會無限長大。</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- Feature Stack · section 2 -->
+  <section class="stack" id="playback">
+    <div class="stack__pin">
+      <p class="stack__kicker">播放</p>
+      <h2 class="stack__h">這部分完全<br />不是我寫的</h2>
+      <p class="stack__note">
+        視窗裡跑的就是你自己的 mpv，讀你自己的 <code>mpv.conf</code> 和
+        <code>input.conf</code>。它會的，這裡就會。
+      </p>
+      <a class="btn btn--ghost btn--sm" href="https://github.com/bosen12/AX_Player#快捷鍵">看快捷鍵</a>
+    </div>
+    <div class="stack__run">
+      <article class="panel">
+        <h3 class="panel__h">uosc · thumbfast</h3>
+        <p>畫面上的控制列、時間軸、拖曳時的縮圖預覽，都是 mpv 腳本畫的，不是這裡重畫的。你原本調好的樣子會原封不動出現。</p>
+      </article>
+      <article class="panel">
+        <h3 class="panel__h">你的快捷鍵真的會動</h3>
+        <p>Windows 上 libmpv 的嵌入子視窗收不到滑鼠鍵盤，所以每一個移動、點擊、滾輪、按鍵都由外殼轉送給 mpv。<code>Ctrl+1..9</code> 的 Anime4K、<code>F3</code> 的補幀開關，都照你 <code>input.conf</code> 寫的走。</p>
+      </article>
+      <article class="panel">
+        <h3 class="panel__h">診斷面板</h3>
+        <p>來源幀率對輸出幀率、掉幀、A/V 同步、著色器層數，加上 nvidia-smi 的 GPU／VRAM／溫度。它只回答 mpv 自己的 <code>Shift+I</code> 答不了的那部分。</p>
+      </article>
+      <article class="panel">
+        <h3 class="panel__h">接得上 Fluid Motion</h3>
+        <p>標題列那個波形按鈕送出 <code>F3</code>，交給補幀管理器處理。兩個專案彼此獨立，各自可以單獨用。</p>
+        <p><a class="inline-link" href="https://bosen12.github.io/Fluid_Motion_Player/">看 Fluid Motion</a></p>
+      </article>
+    </div>
+  </section>
+
+  <!-- measured -->
+  <section class="measured" id="measured">
+    <h2 class="sec__h">量過的，不是猜的</h2>
+    <p class="sec__lede">
+      下面每個數字都是在同一台機器上實測出來的，不是估計。測試條件寫在旁邊，
+      換一台機器結果就會不一樣。
+    </p>
+    <div class="grid-num">
+      <div class="numcard">
+        <p class="numcard__v">1.04<span>s</span></p>
+        <p class="numcard__k">產生一張九宮格 contact sheet</p>
+        <p class="numcard__c">改用單一行程 <code>--sstep</code> 之後。先前開九個行程要 4.54s —— 成本幾乎全在啟動行程，不在解碼。</p>
+      </div>
+      <div class="numcard">
+        <p class="numcard__v">0.48<span>s</span></p>
+        <p class="numcard__k">產生一張側邊欄縮圖</p>
+        <p class="numcard__c">一幀、一個 mpv 行程。同時最多跑四個，因為 GPU 解碼工作階段是有限資源。</p>
+      </div>
+      <div class="numcard">
+        <p class="numcard__v">0.14<span>s</span></p>
+        <p class="numcard__k">按下 seek 到畫面出現</p>
+        <p class="numcard__c">補幀濾鏡在 seek 時先拆掉的情況。留著一起 seek 是 0.34s —— 人感受到的是前者。</p>
+      </div>
+      <div class="numcard">
+        <p class="numcard__v">2.0<span>s</span></p>
+        <p class="numcard__k">onedir 從點擊到視窗出現</p>
+        <p class="numcard__c">onefile 是 3.6s，因為它每次啟動都要把整包解壓到 %TEMP%，不是只有第一次。</p>
+      </div>
+    </div>
+    <p class="fine">
+      測試機：RTX 5070 Ti · 165 Hz · Windows 11 · 本機 SSD 上的真實影片檔。
+    </p>
+  </section>
+
+  <!-- get -->
+  <section class="get" id="get">
+    <h2 class="sec__h">拿哪一個</h2>
+    <div class="get__two">
+      <article class="pick pick--rec">
+        <p class="pick__tag">日常建議</p>
+        <h3 class="pick__h">onedir</h3>
+        <p class="pick__d">解壓後執行裡面的 <code>AXPlayer.exe</code>。開得快，每次都省那 1.5 秒。</p>
+        <dl class="pick__spec">
+          <div><dt>啟動</dt><dd>約 2.0 秒</dd></div>
+          <div><dt>大小</dt><dd>165 MB / 317 個檔</dd></div>
+          <div><dt>注意</dt><dd>exe 必須和同層的 <code>_internal</code> 一起搬</dd></div>
+        </dl>
+        <a class="btn btn--solid" href="https://github.com/bosen12/AX_Player/releases/latest">下載 AXPlayer-onedir.zip</a>
+      </article>
+      <article class="pick">
+        <p class="pick__tag">帶著走</p>
+        <h3 class="pick__h">onefile</h3>
+        <p class="pick__d">一個檔案，丟到隨身碟或別台電腦不會漏東西。</p>
+        <dl class="pick__spec">
+          <div><dt>啟動</dt><dd>約 3.6 秒</dd></div>
+          <div><dt>大小</dt><dd>67 MB，單一檔案</dd></div>
+          <div><dt>注意</dt><dd>每次啟動都要解壓到 %TEMP%</dd></div>
+        </dl>
+        <a class="btn btn--ghost" href="https://github.com/bosen12/AX_Player/releases/latest">下載 AXPlayer.exe</a>
+      </article>
+    </div>
+
+    <div class="where">
+      <h3 class="where__h">mpv 從哪裡來</h3>
+      <p class="where__d">
+        兩個版本都<strong>沒有</strong>把 <code>mpv.exe</code> 和 <code>libmpv-2.dll</code> 打包進去（檔案大、更新頻繁）。
+        啟動時依序找這三個位置，用第一個找得到的：
+      </p>
+      <ol class="where__list">
+        <li><code>%LOCALAPPDATA%\AXPlayer\mpv-runtime\</code><span>首次啟動自動下載官方版本的地方</span></li>
+        <li><code>C:\mpv\</code><span>你自己那套完整設定，如果有的話會直接接手</span></li>
+        <li><code>%ProgramFiles%\mpv\</code></li>
+      </ol>
+      <p class="where__d">
+        uosc、thumbfast、字型與設定檔已經打包在 exe 內，不需要另外準備。
+        用網址播放需要 <code>yt-dlp.exe</code>，放在同一個 mpv 資料夾。
+      </p>
+    </div>
+  </section>
+  </main>
+
+  <!-- Ft4 · dense typographic colophon -->
+  <footer class="colophon">
+    <p class="colophon__line">
+      <strong>AX Player</strong> — 原始碼 MIT 授權，作者 bosen12。
+      介面以 PySide6（Qt for Python）繪製；播放由嵌入的 <strong>libmpv</strong> 負責。
+      mpv 依其自身授權散布（LGPLv2.1+ / GPLv2+，視建置選項而定），
+      <strong>不</strong>包含在本專案的 MIT 授權範圍內，也不隨 exe 一同散布 —— 首次啟動時取得的是
+      mpv 官方的 Windows 建置。畫面上的控制與縮圖預覽來自
+      <strong>uosc</strong> 與 <strong>thumbfast</strong>；升頻著色器來自 <strong>Anime4K</strong>（MIT）。
+      各第三方元件的完整授權條文隨附於 <code>mpv-runtime/LICENSES/</code> 與 <code>NOTICE.md</code>。
+      即時補幀由另一個獨立專案 <strong>Fluid Motion</strong> 提供，兩者可各自單獨使用。
+    </p>
+    <ul class="colophon__links">
+      <li><a href="https://github.com/bosen12/AX_Player">GitHub</a></li>
+      <li><a href="https://github.com/bosen12/AX_Player/releases">所有版本</a></li>
+      <li><a href="https://github.com/bosen12/AX_Player/blob/main/README.md">README</a></li>
+      <li><a href="https://bosen12.github.io/Fluid_Motion_Player/">Fluid Motion</a></li>
+      <li><a href="https://mpv.io">mpv.io</a></li>
+    </ul>
+    <p class="colophon__end">2026 · 本頁不使用 cookie，沒有追蹤，沒有分析。</p>
+  </footer>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

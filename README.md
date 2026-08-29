@@ -1,5 +1,7 @@
 # AX Player
 
+**介紹網頁 → <https://bosen12.github.io/AX_Player/>**
+
 一個把 [mpv](https://mpv.io/) 直接嵌入視窗的桌面播放器。介面（無邊框標題列、側邊欄片庫）用 PySide6 原生 Qt widgets 畫，但播放本身——進度條、縮圖預覽、快捷鍵、全螢幕、字幕/音軌切換——完全交給嵌入的 mpv 自己處理，透過 [uosc](https://github.com/tomasklaen/uosc) 和 [thumbfast](https://github.com/po5/thumbfast) 這兩個 mpv 腳本畫在畫面上。這個專案刻意不重新實作 mpv 已經做得很好的東西，只補上「資料夾片庫」跟「視窗殼」這兩塊 mpv 本身沒有的功能。
 
 ## 特色
