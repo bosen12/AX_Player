@@ -410,6 +410,27 @@ class AXPlayerWindow(QWidget):
     def open_folder(
         self, folder: Path, select: Path | None = None, *, reload_player: bool = True
     ) -> None:
+        # Resolved on the way in, because play() already resolves every file it
+        # is handed and the two have to agree. Two things went wrong while they
+        # did not:
+        #
+        # - A relative folder (run.bat passes %* straight through) reached
+        #   _ScanJob unchanged, so _playlist held relative paths, so the m3u8
+        #   load_playlist writes into %TEMP% held them too -- and mpv resolves
+        #   a relative playlist entry against the *playlist file's* directory,
+        #   not the cwd. Measured: "Failed to open <temp-dir>/vids/clip.mkv"
+        #   for every row. settings.last_folder stored the relative path as
+        #   well, so the next launch broke again from a different cwd.
+        # - resolve() canonicalises case on Windows (measured: realcase/clip.mp4
+        #   -> RealCase\Clip.MP4), so a folder opened under any other case
+        #   matched nothing in its own playlist: every click fell through to a
+        #   rescan, and with 含子資料夾 on, play()'s `self._folder in
+        #   video.parents` test missed too and re-rooted the library onto the
+        #   subdirectory -- the bug v1.1.6 closed, through a third door.
+        #
+        # A no-op for the paths that already arrive canonical, which is all of
+        # them from the file dialog, a drop, or Explorer.
+        folder = Path(folder).resolve()
         self._folder = folder
         self._requested_thumbs.clear()
         settings.set_last_folder(str(folder))

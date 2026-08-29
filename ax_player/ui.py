@@ -864,8 +864,14 @@ class Sidebar(QWidget):
         self._sheet_popup.show_image(pixmap, self._popup_pos())
 
     def _popup_pos(self) -> QPoint:
-        # To the right of the sidebar, roughly level with the row -- clear of
-        # the row itself so the popup never covers what triggered it.
+        # To the right of the sidebar, pinned near the top -- not level with
+        # the hovered row. Following the row was the original intent and the
+        # comment claimed it for a while, but a fixed anchor is what is
+        # actually wanted here: the sheet is up to nine cells tall, so tracking
+        # a row near the bottom of a long list would push it off-screen, and
+        # a popup that jumps as the cursor slides down the list is worse to
+        # read than one that stays put. Clear of the rows either way, so it
+        # never covers what triggered it.
         return self.mapToGlobal(QPoint(self.width(), 8))
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802

@@ -115,3 +115,32 @@ def test_debug_log_rotates_and_keeps_one_generation(monkeypatch):
 def test_the_suite_never_touches_the_real_cache():
     """Guards the conftest fixture itself."""
     assert "Temp" in str(app_data_dir()) or "tmp" in str(app_data_dir()).lower()
+
+
+def test_an_unchanged_position_is_not_written_again(monkeypatch):
+    """The 5-second progress poll fires whether or not playback advanced, so a
+    paused player rewrote the whole database -- byte for byte identical -- 12
+    times a minute for as long as it sat there.
+
+    Counted by intercepting the swap rather than by looking at the file's size
+    or mtime: stat() on this filesystem reports values minutes out of date
+    (see HANDOFF 1.2), so a size/mtime comparison cannot answer this.
+    """
+    from ax_player import resume
+
+    swaps = []
+    real_replace = resume.os.replace
+    monkeypatch.setattr(
+        resume.os, "replace", lambda src, dst: (swaps.append(dst), real_replace(src, dst))[1]
+    )
+
+    resume.save_progress(r"C:\V\a.mkv", 120.0, 1440.0)
+    assert len(swaps) == 1, "the first write has to happen"
+
+    resume.save_progress(r"C:\V\a.mkv", 120.0, 1440.0)
+    assert len(swaps) == 1, "an identical sample rewrote the whole database"
+
+    resume.save_progress(r"C:\V\a.mkv", 125.0, 1440.0)
+    assert len(swaps) == 2, "a real move forward stopped being recorded"
+
+    assert resume.get_progress(r"C:\V\a.mkv")["pos"] == 125.0

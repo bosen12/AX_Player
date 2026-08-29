@@ -25,7 +25,9 @@
 
 **重要**：打包版 AX Player 的 mpv root 解析順序是 `%LOCALAPPDATA%\AXPlayer\mpv-runtime` → `C:\mpv` → `%ProgramFiles%\mpv`。第一個不存在，所以**打包版實際使用 `C:\mpv`**。改 mpv 設定或 lua 要改那裡，不是 repo 的 `mpv-runtime/`（那份是給原始碼版和打包進 exe 的種子用的，兩邊要一起改）。
 
-目前版本：**AX Player v1.1.8**、**Fluid Motion v1.4.6**，都已 commit、push、build、部署、發 release。
+目前版本：**AX Player v1.1.9**、**Fluid Motion v1.4.7**，都已 commit、push、build、部署、發 release。
+
+**上一版這句話有一半是錯的**：v1.1.8 的 tag 確實推上去了（指向 `b1be307`），但 **GitHub 上從來沒有 v1.1.8 的 release**，連草稿都沒有 —— 上一輪的發布那一步沒有成功，而這份文件寫成做完了。08-29 查 `gh release list` 才發現。已決定不補發，v1.1.9 直接取代它。**發完 release 要用 `gh release list` 看一眼**，不要憑印象寫進這裡。
 
 ---
 
@@ -346,6 +348,7 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 | 遞迴模式拖曳未掃描的檔 | **真的，已修**。實測媒體庫被換成 `C:\V\Sub` |
 
 **修法本身也量過。** 關閉噴錯的直覺解法是 `waitForDone()` —— 實測：12 個排隊 × 1.2 秒 → 1.21 秒；但**其中一個抓幀卡到 `GRAB_TIMEOUT` 就是凍結 30 秒**。拿一行日誌換關閉凍結半分鐘不划算。改成 `clear()`（只丟沒開始的）+ 在 `run()` 裡守住 emit。
+**（這一句在 08-29 被修正了一半，見 §8.2：等待並沒有消失，只是搬到視窗消失之後。）**
 
 ### 查過、判斷不值得動
 
@@ -364,3 +367,70 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 ### 維護提醒
 
 **thumbfast 是 vendored patch。** 日後更新 thumbfast 要重新套用三處修改（拿掉 `env`、per-attempt 重試、拿掉 OSD 橫幅），檔案裡有 `AX Player patch:` 註解標示位置，而且 `mpv-runtime/scripts/` 和 `C:\mpv\scripts\` 兩份都要改。
+
+---
+
+## 8. 08-29 的複查
+
+兩個 repo 都從頭讀過一遍，逐條驗證後改了六處。基準線：AX Player 15 passed → 18 passed，Fluid Motion 144 passed → 145 passed。
+
+### 8.1 改掉的
+
+| 專案 | 問題 | 證據 |
+|---|---|---|
+| AX | `open_folder()` 不正規化路徑 | 相對資料夾（`run.bat` 的 `%*` 直接透傳）會讓 `_playlist` 存相對路徑，而 m3u8 寫在 `%TEMP%`，**mpv 對 playlist 的相對項目是以 playlist 檔案所在目錄解析**——實測 `Failed to open <temp>/vids/clip.mkv`，整份清單一個都播不了，`last_folder` 還會把相對路徑存起來。另外 `resolve()` 在 Windows 會正規化大小寫（實測 `realcase/clip.mp4` → `RealCase\Clip.MP4`），而 `play()` 有 resolve、`open_folder()` 沒有，大小寫不同的資料夾等於每次點擊都重掃，遞迴模式下還會把媒體庫改根——就是 v1.1.6 修過的那個 bug 的第三道門。修法是 `open_folder` 開頭一行 `resolve()`，對本來就正規的路徑是 no-op |
+| AX | 暫停時每 5 秒重寫整個 resume.json | 5 秒輪詢不管暫停與否都跑，`save_progress` 也不比對。實測 5000 筆 = 630 KiB、單次 3.79 ms → 暫停時 7.4 MiB/分的無謂寫入。**CPU 這一面不成立**（0.076% 單核，低於撤回其他效能項的同一把尺），理由只有寫入放大。順帶：影片播到最後 5% 之後 `pos` 固定寫 0.0，現在那段也不再重複寫 |
+| FM | `media-title` 被當 HTML 塞進 UI | `renderPlayers` 是全檔唯一一個把外部資料丟進 `innerHTML` 的地方。實測：ffmpeg 給 mkv 寫 `-metadata title='<img src=x onerror=alert(1)>'`，mpv 就原字串回報 media-title。`<img onerror>` 經 innerHTML 是會執行的，而且環境裡有 `window.pywebview.api`（`quit()` / `start_setup()` 觸發 3.5 GB 下載 / `open_engine_cache()` 走 `os.startfile`）。串流更糟——標題來自對方。加了 `escapeHtml()`，用 node 對著真實 payload 驗過：`<img` → `&lt;img`，CJK 標題原樣通過 |
+| FM | `python -m fluid_motion` 吞掉離開碼 | `__main__.py` 只有 `main()`。實測 `main()` 回 42 → 行程離開碼 0，修後 42。打包版走 `packaging/launch.py`，本來就是對的 |
+| FM | 版本號停在 1.0.0 | git tag 當時已到 v1.4.6，程式裡卻還寫 1.0.0。這一輪隨著發版改成 **1.4.7**。沒有任何 CI 會 bump 它，所以**下次發版要記得手動改** `fluid_motion/__init__.py` 和 `pyproject.toml`（或改成從 tag 推導）。影響只在文件與 wheel 層面，沒有程式讀 `__version__` |
+| AX | 根目錄兩個空目錄 `.exe/`、`hi/` | 誤打的指令留下的；git 看不到空目錄所以 status 一直是乾淨的。已刪 |
+
+另外補了兩處註解：`inject._vf_arg` 把「vf 參數永遠是 `~~/` 相對、而 `~~` 是**播放器自己的** config dir」這個對呼叫端的約束寫明（`apply()` 拿到的 root 必須是 `player_config_dir(ipc)`，否則 .vpy 寫在 A、vf 指向 B，mpv 只會說 could not init VS）；`ui._popup_pos` 的註解原本說 popup「roughly level with the row」，實際是寫死 `y=8`，改成說明為什麼固定錨點才是對的。
+
+### 8.2 修正 §7 的一句話：`clear()` 並沒有讓關閉的等待消失
+
+§7 說「`waitForDone()` 會凍結 30 秒，所以改成 `clear()`」。**前半對，後半不完整。** 實測（QThreadPool + 兩個 sleep 3 秒的工作，先 `clear()` 再 `close()`）：
+
+```
+視窗立刻消失
+process teardown reached at +0.00s
+total wall 3217 ms          (工作 sleep 3000 ms)
+```
+
+行程收尾仍然會等 pool 裡**正在跑**的工作。差別是真實的、而且現行做法仍然比較好——視窗確實立刻不見了——但「凍結沒有了」是錯的：它變成一個看不見的幽靈行程，而那正是 `build.bat` 的 robocopy 會抱怨 exe 被鎖住的原因之一。
+
+**沒有改**：`clear()` 已經把排隊的丟掉，剩下的只有 ≤4 個正在跑的，照 §7 自己量的「一個 job 約 1.2 秒」，典型殘留就是 **1.2 秒**（30 秒只發生在抓幀卡死時）。為了 1.2 秒去動抓幀核心不划算。真要解得讓 job 可取消（`_grab_evenly_spaced` 的輪詢迴圈裡看旗標並 kill 子行程），列在這裡當作已知、已量、暫不處理。
+
+### 8.3 量過之後撤回的
+
+**「補幀開著時每次 seek 都會來回切 hwdec 兩次」——不成立。**
+
+我從程式碼推出這條並且用假 IPC 驗證了機制（`remove()` → `restore_hwdec()` → 下次 `apply()` → `ensure_copyback_hwdec()`，一個 seek 週期 3 次 hwdec 寫入）。但實際流程走不到：lua 在 `seek` 事件當下就把 `@fluid` 拿掉，watcher 0.3 秒後 tick 讀到的 `vf` 已經沒有 fluid，`player.interpolation` 是 False，於是只走 `_invalidate()`、**不呼叫 `remove()`**，hwdec 全程維持 `auto-copy`，重新 apply 時 `ensure_copyback_hwdec` 直接 early return。設計是對的。
+
+**但順帶量到一個以前沒記錄的數字：mpv 執行期改 hwdec 會讓播放停頓約 0.65 秒。**（720p h264、`--no-config`，比較媒體時間與牆鐘時間的落差）
+
+```
+control (nothing)     media 1.500s / wall 1.517s  -> lost +0.017s
+set hwdec=auto-copy   media 0.867s / wall 1.549s  -> lost +0.682s
+set hwdec=auto-safe   media 0.833s / wall 1.518s  -> lost +0.685s
+control (nothing)     media 1.534s / wall 1.518s  -> lost -0.016s
+set hwdec=auto-copy   media 0.900s / wall 1.533s  -> lost +0.633s
+set same value again  media 1.500s / wall 1.535s  -> lost +0.035s
+```
+
+**設成相同的值幾乎免費**（+0.035s），設成不同值就是一次完整的解碼鏈重建。這筆成本落在每一次 F3／UI 開關補幀上：開一次 0.65 秒、關一次 0.65 秒，全都在濾鏡本身重建時間之外。要不要改成「整個 session 維持 copy-back、不在關閉時還原」是個取捨——我沒有量過 copy-back 在正常播放時的實際代價，所以不給結論，只留數字。
+
+### 8.4 查過、判斷不值得動
+
+1. **診斷面板的 nvidia-smi job 和縮圖共用 `_thumb_pool`。** 面板開著又剛好四個 sheet 在跑時，GPU 讀數會停在幾秒前。但 `GpuQueryJob` 是預設優先權、eager sheet 是 -1，所以它只等**正在跑**的那四個 ≈ 1.2 秒，也就是一個輪詢週期。不值得多開一個池。
+2. **`inject._vf_arg` 那個沒用到的 `script` 參數。** 本來想拿掉，但 `test_vf_arg_uses_label` 是帶著參數呼叫並斷言 `"C:" not in arg` ——那個參數不是疏漏，測試刻意在記錄「路徑一律走 `~~/`」。改成補註解說明約束。
+3. **`bootstrap._download` 失敗時留下 `.part`。** AX Player 的 `mpv_fetch._download` 已經用 `finally` 清掉，FM 沒有。但那個檔從不被讀（判斷用的是 `dest` 不是 `tmp`），重試會覆蓋，而且 §7 已經確認 `downloads` 目錄在這台機器上根本不存在。
+4. **lua `write_hotkey` 與 watcher 讀取之間的 truncate race。** mpv 以 `"w"` 開檔（截斷）到寫入之間，watcher 若剛好讀到會拿到空字串、按鍵掉一次。窗口是微秒級，`HOTKEY_POLL` 是 50 ms。
+
+### 8.5 沒有動，因為那是你的決定
+
+**Fluid Motion 的 repo 裡 commit 了一份 126 MB 的 mpv。** `mpv/` 共 96 個檔案，`mpv/mpv.exe` 109 MB 走 Git LFS（`.git/lfs` 105 M），其餘約 16 MB 是一般 git 物件。
+
+已確認**沒有任何東西讀它**：`mpv_root_candidates()` 找的是 `C:\mpv`／ProgramFiles／`~/mpv`／AXPlayer runtime／scoop／chocolatey／PATH，不含 repo 內的 `mpv/`；`FluidMotion.spec` 的 `datas` 只有 `fluid_motion/ui` 和 `fluid_motion/resources`；測試也沒碰。GitHub 免費 LFS 是 1 GB 儲存／1 GB 頻寬每月，大約十次 clone 就滿。
+
+AX Player 的做法是對的（binary 不進版控，`setup_mpv.py` 現抓）。但把它從歷史移除要 rewrite history，會影響任何已經 clone 的人，而且已經 push 出去了——**這不是我該自己決定的，等你說。** 只加 `.gitignore` 沒有用，那只讓未來的 commit 乾淨，105 MB 的 LFS 物件還在。

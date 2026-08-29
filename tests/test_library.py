@@ -112,3 +112,49 @@ def test_emit_safely_swallows_only_a_dead_receiver():
         pass
     else:
         raise AssertionError("a genuine error was swallowed")
+
+
+class _OpenWindow:
+    """Enough of AXPlayerWindow for open_folder()."""
+
+    def __init__(self, recursive=False):
+        self._folder = None
+        self._recursive = recursive
+        self._requested_thumbs = {"stale"}
+        self._sort_mode = "name"
+        self._scan_signals = object()
+        self.jobs = []
+        self._scan_pool = types.SimpleNamespace(start=self.jobs.append)
+
+
+def test_open_folder_normalises_a_relative_path(tmp_path, monkeypatch):
+    """mpv resolves relative playlist entries against the *playlist file's*
+    directory, and load_playlist writes that file into %TEMP% -- so a relative
+    folder produces a sidebar full of rows every one of which fails to open
+    ("Failed to open <temp-dir>/vids/clip.mkv", measured). settings.last_folder
+    keeps the relative path too, so the next launch breaks again from a
+    different cwd."""
+    (tmp_path / "vids").mkdir()
+    monkeypatch.chdir(tmp_path)
+    w = _OpenWindow()
+
+    AXPlayerWindow.open_folder(w, Path("vids"))
+
+    assert w._folder.is_absolute(), "a relative folder reached the scan and the player"
+    assert w._folder == (tmp_path / "vids").resolve()
+    assert w.jobs and w.jobs[0]._folder == w._folder, "the scan got a different path"
+
+
+def test_open_folder_agrees_with_the_case_play_resolves_to(tmp_path, monkeypatch):
+    """play() resolves before testing membership, and resolve() canonicalises
+    case on Windows. A folder opened under different case therefore matched
+    nothing in its own playlist: every click rescanned, and with 含子資料夾 on
+    the library re-rooted onto the subdirectory -- the bug v1.1.6 closed,
+    reached through a third door."""
+    (tmp_path / "RealCase").mkdir()
+    monkeypatch.chdir(tmp_path)
+    w = _OpenWindow()
+
+    AXPlayerWindow.open_folder(w, Path("realcase"))
+
+    assert w._folder == (tmp_path / "realcase").resolve()
