@@ -8,7 +8,7 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
-from ax_player import debug_log
+from ax_player import debug_log, dnd
 from ax_player.paths import default_mpv_root, libmpv_dll, mpv_exe, ytdlp_exe
 
 _dll = libmpv_dll()
@@ -443,31 +443,20 @@ class PlayerWidget(QWidget):
         event.accept()
 
     # -- drag & drop ---------------------------------------------------------
-    # A real dragged hyperlink (e.g. from a browser) sets text/uri-list,
-    # which QMimeData.hasUrls()/.urls() reads. Dragging plain URL *text*
-    # (selected text, not a link object -- from a chat window, an address
-    # bar, etc.) usually only sets text/plain, which hasUrls() ignores
-    # entirely -- the drag would be silently rejected with no feedback at
-    # all. Falls back to parsing plain text as one URL per line, matching
-    # what the web-page drop handler (app.js) already does for drops
-    # landing outside this widget's area.
-    def _dropped_uris(self, mime) -> list[str]:
-        if mime.hasUrls():
-            return [u.toString() for u in mime.urls()]
-        if mime.hasText():
-            return [line.strip() for line in mime.text().splitlines() if line.strip() and not line.strip().startswith("#")]
-        return []
-
+    # Drops landing on the video arrive here; drops on the window's own chrome
+    # arrive at AXPlayerWindow. Both read the mime data through ax_player.dnd,
+    # which is where the note about dragged links versus dragged link *text*
+    # now lives -- the two handlers had a copy each.
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls() or event.mimeData().hasText():
+        if dnd.has_uris(event.mimeData()):
             event.acceptProposedAction()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls() or event.mimeData().hasText():
+        if dnd.has_uris(event.mimeData()):
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        uris = self._dropped_uris(event.mimeData())
+        uris = dnd.uris_from_mime(event.mimeData())
         if uris:
             self.files_dropped.emit(uris)
             event.acceptProposedAction()

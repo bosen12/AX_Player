@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QStyledItemDelegate,
@@ -54,7 +55,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ax_player import settings
+from ax_player import resume, settings
 
 # Ported from the old style.css custom properties (which were in oklch).
 PAPER = "#171310"
@@ -141,6 +142,9 @@ class _ChromeButton(QAbstractButton):
             for i, height in enumerate((4.5, 8.0, 6.0)):
                 x = cx - 5 + i * 5
                 painter.drawLine(QPointF(x, cy + 4), QPointF(x, cy + 4 - height))
+        elif self._kind == "pin":
+            painter.drawEllipse(QRectF(cx - 3.2, cy - 5.5, 6.4, 6.4))
+            painter.drawLine(QPointF(cx, cy + 1), QPointF(cx, cy + 6))
         elif self._kind == "fluid":
             painter.save()
             painter.translate(cx - 8, cy - 8)
@@ -161,6 +165,7 @@ class TitleBar(QWidget):
     close_clicked = Signal()
     fluid_clicked = Signal()
     stats_clicked = Signal()
+    pin_clicked = Signal()
     drag_started = Signal()
 
     def __init__(self, parent: QWidget | None = None):
@@ -201,9 +206,14 @@ class TitleBar(QWidget):
         self._stats.setToolTip("播放診斷")
         self._stats.clicked.connect(self.stats_clicked)
 
+        self._pin = _ChromeButton("pin", self, width=38)
+        self._pin.setToolTip("視窗置頂")
+        self._pin.clicked.connect(self.pin_clicked)
+
         layout.addWidget(bulb)
         layout.addWidget(wordmark)
         layout.addWidget(self._title, 1)
+        layout.addWidget(self._pin)
         layout.addWidget(self._stats)
         layout.addWidget(self._fluid)
 
@@ -225,6 +235,9 @@ class TitleBar(QWidget):
 
     def set_stats_active(self, on: bool) -> None:
         self._stats.set_active(on)
+
+    def set_pin_active(self, on: bool) -> None:
+        self._pin.set_active(on)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -295,6 +308,11 @@ class _RowDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # Without this the cover-crop below resamples with the fast (nearest)
+        # transform, which is what made the thumbnails visibly jagged. Cheap
+        # now that thumbnail_pixmap() hands over an already row-sized image,
+        # so the draw is near 1:1 rather than a 320 -> 116 reduction.
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         rect = QRectF(option.rect).adjusted(0, 0, 0, -2)
         playing = bool(index.data(PLAYING_ROLE))
@@ -568,26 +586,59 @@ class ContactSheetPopup(QWidget):
                 border-radius: 8px;
             }}
             QLabel {{ color: {MUTED}; font-family: {FONT_UI}; font-size: 12px; background: transparent; }}
+            QLabel#sheetCaption {{ color: {INK}; font-size: 11px; padding: 2px 2px 0 2px; }}
             """
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        # The row itself clamps the name to two lines, so a long filename is
+        # unreadable there. It goes here instead of in a tooltip: a second
+        # popup fighting this one for the same hover would be worse than no
+        # answer at all, and this window is already what a hover produces.
+        self._caption = QLabel(self)
+        self._caption.setObjectName("sheetCaption")
+        self._caption.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._label = QLabel(self)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._caption)
         layout.addWidget(self._label)
 
-    def show_loading(self, top_left) -> None:
+    def _set_caption(self, text: str) -> None:
+        self._caption.setVisible(bool(text))
+        self._caption.setText(text)
+
+    def show_loading(self, top_left, caption: str = "") -> None:
+        self._set_caption(caption)
+        self._label.setPixmap(QPixmap())
         self._label.setText("正在產生預覽…")
         self._label.setFixedSize(200, 60)
-        self.adjustSize()
-        self.move(top_left)
-        self.show()
+        self._place(top_left)
 
-    def show_image(self, pixmap: QPixmap, top_left) -> None:
+    def show_image(self, pixmap: QPixmap, top_left, caption: str = "") -> None:
+        self._set_caption(caption)
+        self._label.setText("")
         self._label.setPixmap(pixmap)
         self._label.setFixedSize(pixmap.size())
+        self._place(top_left)
+
+    def _place(self, top_left) -> None:
+        """Move onto `top_left`, then pull back onto the screen.
+
+        Qt does not reposition a hand-moved ToolTip-flagged window, and this
+        one is 672px of sheet wide: on a 1366-wide laptop every window
+        position past x=376 pushed the right-hand column off the screen
+        entirely, which is the third of the grid the user was reaching for.
+        """
         self.adjustSize()
         self.move(top_left)
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            bounds = screen.availableGeometry()
+            size = self.size()
+            x = min(top_left.x(), bounds.right() - size.width() + 1)
+            y = min(top_left.y(), bounds.bottom() - size.height() + 1)
+            self.move(max(bounds.left(), x), max(bounds.top(), y))
         self.show()
 
     def hide_now(self) -> None:
@@ -606,6 +657,8 @@ class Sidebar(QWidget):
     remove_requested = Signal(list)
     thumb_requested = Signal(str)
     sheet_requested = Signal(str)
+    watched_changed = Signal(list, bool)  # [str path], watched
+    reveal_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -614,6 +667,13 @@ class Sidebar(QWidget):
         self.setStyleSheet(_SIDEBAR_QSS)
 
         self._rows: dict[str, QListWidgetItem] = {}
+        # Thumbnails survive a rebuild of the rows. Re-sorting used to throw
+        # every loaded pixmap away with the items, and re-asking for them was
+        # not free either -- AXPlayerWindow.request_thumbnail keeps a
+        # "already asked" set, so anything already generated was simply gone
+        # until the folder was reopened. Kept trimmed to the listed files in
+        # set_items so it cannot grow across folders.
+        self._thumbs: dict[str, QPixmap] = {}
         self._playing: str | None = None
         self._pending_thumbs: set[str] = set()
         self._flush = QTimer(self)
@@ -712,6 +772,8 @@ class Sidebar(QWidget):
         # modifier ambiguity, so it plays unconditionally.
         self._list.itemActivated.connect(self._on_item_activated)
         self._list.itemSelectionChanged.connect(self._update_selection_bar)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._show_row_menu)
         self._list.hide()
         layout.addWidget(self._list, 1)
 
@@ -771,13 +833,25 @@ class Sidebar(QWidget):
         return str(self._sort.currentData())
 
     # -- population ------------------------------------------------------
-    def set_items(self, folder_name: str, items: list[dict]) -> None:
+    def set_items(self, folder_name: str, items: list[dict], *, keep_filter: bool = False) -> None:
+        """Replace the whole list.
+
+        keep_filter is for a re-list of the *same* folder -- a re-sort or an
+        F5 rescan. Clearing the search box is right when the folder changes
+        and wrong when it does not: re-sorting silently threw away whatever
+        the user had typed to find the file they were about to play.
+        """
         # Uppercased here rather than in the stylesheet: Qt style sheets have
         # no text-transform.
         self._folder_name.setText(folder_name.upper() if folder_name else "尚未開啟資料夾")
-        self._search.clear()
+        if not keep_filter:
+            self._search.clear()
         self._list.clear()
         self._rows.clear()
+        # Anything not in the new listing is gone for good; anything still
+        # here keeps the image it already had.
+        listed = {entry["path"] for entry in items}
+        self._thumbs = {path: pix for path, pix in self._thumbs.items() if path in listed}
         self._hover_delay.stop()
         self._hover_path = None
         self._sheet_popup.hide_now()
@@ -791,6 +865,9 @@ class Sidebar(QWidget):
             item.setData(PROGRESS_ROLE, pos / duration if duration > 0 else 0.0)
             item.setData(WATCHED_ROLE, bool(progress.get("watched")))
             item.setData(PLAYING_ROLE, False)
+            cached = self._thumbs.get(entry["path"])
+            if cached is not None:
+                item.setData(PIXMAP_ROLE, cached)
             self._list.addItem(item)
             self._rows[entry["path"]] = item
 
@@ -808,9 +885,42 @@ class Sidebar(QWidget):
             self.set_playing(self._playing)
 
     def set_thumbnail(self, path: str, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
+        self._thumbs[path] = pixmap
         item = self._rows.get(path)
-        if item is not None and not pixmap.isNull():
+        if item is not None:
             item.setData(PIXMAP_ROLE, pixmap)
+
+    def remove_rows(self, paths: list[str]) -> None:
+        """Take these rows out without rebuilding the list.
+
+        Rebuilding via set_items() is what "移除選取" used to do, and it cost
+        far more than the removal: the scroll position jumped back to the top,
+        the search box was cleared, the selection was lost -- and every
+        thumbnail went permanently blank, because the rebuilt rows re-asked
+        for images that AXPlayerWindow.request_thumbnail had already recorded
+        as asked-for and would therefore never generate again. Nothing short
+        of reopening the folder brought them back.
+        """
+        for path in paths:
+            item = self._rows.pop(path, None)
+            self._thumbs.pop(path, None)
+            if item is None:
+                continue
+            row = self._list.row(item)
+            if row >= 0:
+                self._list.takeItem(row)
+        if self._playing in paths:
+            self._playing = None
+        if self._hover_path in paths:
+            self._hover_delay.stop()
+            self._hover_path = None
+            self._sheet_popup.hide_now()
+        has_items = self._list.count() > 0
+        self._list.setVisible(has_items)
+        self._empty.setVisible(not has_items)
+        self._update_selection_bar()
 
     def set_playing(self, path: str) -> None:
         self._playing = path
@@ -826,7 +936,7 @@ class Sidebar(QWidget):
             return
         ratio = pos / duration
         item.setData(PROGRESS_ROLE, ratio)
-        item.setData(WATCHED_ROLE, ratio >= 0.95)
+        item.setData(WATCHED_ROLE, ratio >= resume.WATCHED_THRESHOLD)
 
     # -- interaction -----------------------------------------------------
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
@@ -849,8 +959,12 @@ class Sidebar(QWidget):
     def _commit_hover(self) -> None:
         if not self._hover_path:
             return
-        self._sheet_popup.show_loading(self._popup_pos())
+        self._sheet_popup.show_loading(self._popup_pos(), self._caption_for(self._hover_path))
         self.sheet_requested.emit(self._hover_path)
+
+    def _caption_for(self, path: str) -> str:
+        item = self._rows.get(path)
+        return item.text() if item is not None else Path(path).name
 
     def show_contact_sheet(self, path: str, pixmap: QPixmap) -> None:
         # A slow generation can finish after the hover has already moved to
@@ -861,7 +975,7 @@ class Sidebar(QWidget):
         if pixmap.isNull():
             self._sheet_popup.hide_now()
             return
-        self._sheet_popup.show_image(pixmap, self._popup_pos())
+        self._sheet_popup.show_image(pixmap, self._popup_pos(), self._caption_for(path))
 
     def _popup_pos(self) -> QPoint:
         # To the right of the sidebar, pinned near the top -- not level with
@@ -886,17 +1000,90 @@ class Sidebar(QWidget):
         if path:
             self.play_requested.emit(str(path))
 
+    # -- row menu ----------------------------------------------------------
+    def _show_row_menu(self, pos) -> None:
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        # Right-clicking a row outside the current selection acts on that row,
+        # the way every file manager behaves -- otherwise the menu would
+        # silently apply to whatever happened to be selected elsewhere.
+        if not item.isSelected():
+            self._list.clearSelection()
+            item.setSelected(True)
+            self._list.setCurrentItem(item)
+        paths = self._selected_paths()
+        if not paths:
+            return
+        # The sheet popup is a ToolTip window and would sit on top of the menu.
+        self._hover_delay.stop()
+        self._sheet_popup.hide_now()
+        self.build_row_menu(paths).exec(self._list.viewport().mapToGlobal(pos))
+
+    def build_row_menu(self, paths: list[str]) -> QMenu:
+        """The menu for these rows, built but not shown.
+
+        Separate from _show_row_menu because QMenu.exec is a modal loop that
+        cannot be stubbed out from Python -- a test that called it simply
+        blocked on a real menu waiting for a real click. Everything worth
+        checking is in what this returns.
+        """
+        single = len(paths) == 1
+        menu = QMenu(self)
+        menu.addAction("播放", lambda: self.play_requested.emit(paths[0])).setEnabled(single)
+        menu.addSeparator()
+        menu.addAction("標記為已看完", lambda: self.watched_changed.emit(paths, True))
+        menu.addAction("標記為未看", lambda: self.watched_changed.emit(paths, False))
+        menu.addSeparator()
+        menu.addAction(
+            "在檔案總管中顯示", lambda: self.reveal_requested.emit(paths[0])
+        ).setEnabled(single)
+        menu.addAction("複製路徑", lambda: QApplication.clipboard().setText("\n".join(paths)))
+        menu.addSeparator()
+        # Wording kept explicit: this app has never deleted anything off disk
+        # and this menu is not where that changes.
+        menu.addAction("從清單移除（不刪檔案）", self._emit_remove)
+        return menu
+
+    def set_watched(self, paths: list[str], watched: bool) -> None:
+        """Reflect a hand-made watched/unwatched mark back onto the rows."""
+        for path in paths:
+            item = self._rows.get(path)
+            if item is None:
+                continue
+            item.setData(WATCHED_ROLE, watched)
+            if watched:
+                # Matches what resume.set_watched stores: a finished episode
+                # should not also sit at "resume from 23:58".
+                item.setData(PROGRESS_ROLE, 0.0)
+        self._apply_filter()
+
     def _focus_search(self) -> None:
         self._search.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self._search.selectAll()
 
+    def _selected_paths(self) -> list[str]:
+        """The selected rows the user can actually see.
+
+        Qt does not deselect a row when it is hidden, and _apply_filter only
+        hides. So selecting three files and then typing in the search box left
+        all three selected behind the filter: the bar still claimed "已選取 3
+        項" while one row was on screen, and 移除選取 then removed two files
+        the user could no longer see.
+        """
+        return [
+            str(item.data(PATH_ROLE))
+            for item in self._list.selectedItems()
+            if not item.isHidden() and item.data(PATH_ROLE)
+        ]
+
     def _emit_remove(self) -> None:
-        paths = [i.data(PATH_ROLE) for i in self._list.selectedItems()]
+        paths = self._selected_paths()
         if paths:
-            self.remove_requested.emit([str(p) for p in paths])
+            self.remove_requested.emit(paths)
 
     def _update_selection_bar(self) -> None:
-        count = len(self._list.selectedItems())
+        count = len(self._selected_paths())
         self._selection_bar.setVisible(count > 0)
         self._selection_count.setText(f"已選取 {count} 項" if count else "")
 
@@ -909,6 +1096,9 @@ class Sidebar(QWidget):
             if unwatched_only and item.data(WATCHED_ROLE):
                 hidden = True
             item.setHidden(hidden)
+        # Hiding a row does not deselect it, so the count the bar shows (and
+        # what 移除選取 would act on) changes with the filter.
+        self._update_selection_bar()
 
     def _queue_thumb(self, path: str) -> None:
         # Called from the delegate's paint; defer the actual request so
@@ -995,6 +1185,18 @@ QComboBox#sort QAbstractItemView {{
 }}
 QLabel#empty {{ color: {MUTED}; font-size: 12px; padding: 0 8px; }}
 
+QMenu {{
+    background: {PAPER_3};
+    border: 1px solid {RULE};
+    padding: 4px;
+    color: {INK};
+    font-size: 12px;
+}}
+QMenu::item {{ padding: 5px 14px; border-radius: 4px; }}
+QMenu::item:selected {{ background: {ACCENT}; color: {ACCENT_INK}; }}
+QMenu::item:disabled {{ color: {FAINT}; }}
+QMenu::separator {{ height: 1px; background: {RULE}; margin: 4px 6px; }}
+
 QWidget#diagnostics {{
     background: {PAPER_3};
     border: 1px solid {RULE};
@@ -1033,6 +1235,36 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none
 
 
 def thumbnail_pixmap(path: str | Path) -> QPixmap:
+    """The image at full size -- for the contact sheet popup, which shows it."""
     pixmap = QPixmap()
     pixmap.load(str(path))
     return pixmap
+
+
+def row_thumbnail_pixmap(path: str | Path) -> QPixmap:
+    """The same image, scaled once to the size a row actually draws it at.
+
+    A sidebar thumbnail is generated 320px wide and drawn into 116x65. Keeping
+    the full-size pixmap in the item meant every row the user scrolled past
+    stayed in memory at 225 KiB: measured over 1000 distinct thumbnails, the
+    process went from 16.7 MB to 239.5 MB. Scaling here first put the same
+    1000 rows at 59.8 MB, and the delegate's redraw becomes a near-1:1 blit
+    instead of a reduction on every paint.
+
+    Expanding, not fitting: the delegate cover-crops, so the pixmap has to
+    cover the cell in both axes -- and it reads only the aspect ratio from
+    here, so a slightly larger image still crops identically.
+    """
+    pixmap = thumbnail_pixmap(path)
+    if pixmap.isNull():
+        return pixmap
+    screen = QApplication.primaryScreen()
+    ratio = screen.devicePixelRatio() if screen is not None else 1.0
+    target = QSize(int(THUMB_W * ratio), int(THUMB_H * ratio))
+    if pixmap.width() <= target.width() and pixmap.height() <= target.height():
+        return pixmap
+    return pixmap.scaled(
+        target,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )

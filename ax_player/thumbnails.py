@@ -7,6 +7,8 @@ from ax_player.cache import cache_key, prune_cache
 from ax_player.paths import mpv_exe, thumbnail_cache_dir
 
 THUMB_WIDTH = 320
+# Where in the video to grab the sidebar thumbnail from (see generate_thumbnail).
+THUMB_SEEK = "10%"
 
 
 def prune_thumbnail_cache() -> None:
@@ -22,8 +24,17 @@ def generate_thumbnail(video: Path) -> Path | None:
     dest = cached_thumbnail_path(video)
     if dest.is_file() and dest.stat().st_size > 0:
         return dest
-    # Very short clips: --start=3s may be past EOF, so fall back to frame 0.
-    for seek in ("00:00:03", "00:00:00"):
+    # A fraction of the way in, not a fixed three seconds. Three seconds into
+    # a video is the studio logo, a black frame, or the first bar of an OP --
+    # which is what the sidebar was showing for whole folders at a time. mpv's
+    # own --start takes a percentage ("Relative time or percent position", and
+    # verified against the bundled mpv.exe), so this costs no duration probe.
+    #
+    # It also makes the second pass genuinely a fallback. A percentage is
+    # inside the file by construction, so the frame-0 retry no longer runs for
+    # every clip shorter than the old fixed seek -- only when a percent seek
+    # really fails, i.e. mpv could not work out a duration at all.
+    for seek in (THUMB_SEEK, "00:00:00"):
         result = _grab_frame(video, seek, dest, width=THUMB_WIDTH)
         if result is not None:
             return result

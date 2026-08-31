@@ -18,3 +18,9 @@ __pycache__/
 
 # Local preview-server config for the docs/ site. Machine-specific.
 .claude/
+
+# Written by Fluid Motion into the config dir whenever it attaches to a
+# player. Generated per machine (it names the local GPU in a comment), so it
+# is not ours to commit -- it appeared here the first time a test run
+# constructed a real embedded mpv while Fluid Motion was running.
+/mpv-runtime/shaders/fluid_rife.vpy

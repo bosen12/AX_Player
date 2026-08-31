@@ -2,7 +2,13 @@
 import types
 from pathlib import Path
 
-from ax_player.app import AXPlayerWindow, _emit_safely
+from ax_player import resume, settings
+from ax_player.app import (
+    AXPlayerWindow,
+    _emit_safely,
+    _ScanJob,
+    _sort_playlist,
+)
 
 
 class _Window:
@@ -158,3 +164,108 @@ def test_open_folder_agrees_with_the_case_play_resolves_to(tmp_path, monkeypatch
     AXPlayerWindow.open_folder(w, Path("realcase"))
 
     assert w._folder == (tmp_path / "realcase").resolve()
+
+
+# -- ordering ---------------------------------------------------------------
+def test_episode_10_sorts_after_episode_2():
+    """Lexicographic order is wrong for every folder this app is pointed at:
+    'ep10' < 'ep2' as text, so the second episode of a series listed tenth."""
+    names = ["ep10.mkv", "ep2.mkv", "ep1.mkv", "ep20.mkv", "ep3.mkv"]
+    ordered = _sort_playlist([Path(n) for n in names], settings.SORT_NAME)
+
+    assert [p.name for p in ordered] == ["ep1.mkv", "ep2.mkv", "ep3.mkv", "ep10.mkv", "ep20.mkv"]
+
+
+def test_numbering_inside_a_chinese_title_sorts_numerically_too():
+    names = ["第10話.mkv", "第2話.mkv", "第1話.mkv"]
+    ordered = _sort_playlist([Path(n) for n in names], settings.SORT_NAME)
+
+    assert [p.name for p in ordered] == ["第1話.mkv", "第2話.mkv", "第10話.mkv"]
+
+
+def test_leading_zeros_do_not_split_a_run_of_episodes():
+    """'ep02' and 'ep2' are the same number; what must not happen is the
+    zero-padded ones sorting as a separate block."""
+    names = ["ep03.mkv", "ep1.mkv", "ep2.mkv", "ep10.mkv"]
+    ordered = _sort_playlist([Path(n) for n in names], settings.SORT_NAME)
+
+    assert [p.name for p in ordered] == ["ep1.mkv", "ep2.mkv", "ep03.mkv", "ep10.mkv"]
+
+
+def test_size_sorting_still_reads_largest_first(tmp_path):
+    for name, size in (("small.mkv", 10), ("big.mkv", 3000), ("mid.mkv", 500)):
+        (tmp_path / name).write_bytes(b"x" * size)
+    files = [tmp_path / n for n in ("small.mkv", "big.mkv", "mid.mkv")]
+
+    ordered = _sort_playlist(files, settings.SORT_SIZE)
+
+    assert [p.name for p in ordered] == ["big.mkv", "mid.mkv", "small.mkv"]
+
+
+# -- scanning ---------------------------------------------------------------
+def _scan(folder, recursive=False):
+    job = _ScanJob(folder, recursive, None, object(), settings.SORT_NAME, True)
+    return sorted(p.name for p in job._scan())
+
+
+def test_the_scan_finds_videos_and_ignores_everything_else(tmp_path):
+    for name in ("a.mkv", "b.MP4", "c.m2ts", "notes.txt", "cover.jpg"):
+        (tmp_path / name).write_bytes(b"")
+    (tmp_path / "subdir.mkv").mkdir()  # a directory that looks like a video
+
+    assert _scan(tmp_path) == ["a.mkv", "b.MP4", "c.m2ts"]
+
+
+def test_a_recursive_scan_reaches_subfolders(tmp_path):
+    (tmp_path / "S1").mkdir()
+    (tmp_path / "top.mkv").write_bytes(b"")
+    (tmp_path / "S1" / "deep.mkv").write_bytes(b"")
+
+    assert _scan(tmp_path) == ["top.mkv"]
+    assert _scan(tmp_path, recursive=True) == ["deep.mkv", "top.mkv"]
+
+
+def test_a_missing_folder_does_not_take_the_scan_thread_down(tmp_path):
+    job = _ScanJob(tmp_path / "gone", False, None, _Signals(), settings.SORT_NAME, True)
+    job.run()
+
+    assert job._signals.emitted == [(str(tmp_path / "gone"), [], "", True)]
+
+
+class _Signals:
+    def __init__(self):
+        self.emitted = []
+        self.done = self
+
+    def emit(self, *args):
+        self.emitted.append(args)
+
+
+# -- where a folder starts playing -----------------------------------------
+def test_a_folder_starts_at_the_first_episode_not_yet_watched(tmp_path):
+    """Index 0 meant reopening a series always restarted episode 1, however
+    far in the user actually was."""
+    playlist = [tmp_path / f"ep{i}.mkv" for i in range(4)]
+    for video in playlist[:2]:
+        resume.set_watched(str(video), True)
+    w = types.SimpleNamespace(_playlist=playlist)
+
+    assert AXPlayerWindow._first_unwatched_index(w) == 2
+
+
+def test_a_part_watched_episode_is_where_it_resumes(tmp_path):
+    playlist = [tmp_path / f"ep{i}.mkv" for i in range(3)]
+    resume.set_watched(str(playlist[0]), True)
+    resume.save_progress(str(playlist[1]), 300.0, 1400.0)  # half way in
+    w = types.SimpleNamespace(_playlist=playlist)
+
+    assert AXPlayerWindow._first_unwatched_index(w) == 1
+
+
+def test_a_fully_watched_folder_goes_back_to_the_top(tmp_path):
+    playlist = [tmp_path / f"ep{i}.mkv" for i in range(3)]
+    for video in playlist:
+        resume.set_watched(str(video), True)
+    w = types.SimpleNamespace(_playlist=playlist)
+
+    assert AXPlayerWindow._first_unwatched_index(w) == 0

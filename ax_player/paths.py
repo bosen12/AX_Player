@@ -5,13 +5,30 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+# Everything here is something the bundled mpv already decodes. The list was
+# short enough to miss whole categories of real library: .m2ts/.mts is what a
+# Blu-ray rip and a camcorder produce, and .rmvb/.rm is still common in
+# older Chinese-language collections -- mpv played all of them, the scan
+# just never offered them.
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv", ".flv", ".ts", ".m4v", ".mpg", ".mpeg",
+    ".m2ts", ".mts", ".m2v", ".rmvb", ".rm", ".3gp", ".vob", ".ogv", ".ogm", ".asf", ".divx",
+    ".f4v", ".mpv", ".qt",
 }
 
 
 def is_video_file(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def is_video_name(name: str) -> bool:
+    """Same test against a bare filename.
+
+    The directory scan gets names out of os.scandir/os.walk and has no Path
+    for them yet; building one per entry purely to read .suffix undoes the
+    point of scanning that way.
+    """
+    return os.path.splitext(name)[1].lower() in VIDEO_EXTENSIONS
 
 
 def _frozen() -> bool:

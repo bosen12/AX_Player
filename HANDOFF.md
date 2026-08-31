@@ -317,6 +317,44 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 
 沒有已知的未解問題。
 
+### 08-31 這一輪：深度檢查後修掉的
+
+一次側欄／片庫的全面檢查。每一條都先驗證再改，改完都有回歸測試，而且**每個測試都用突變測試確認過真的抓得到**（把修法改回錯的，看測試會不會紅）。
+
+| 修的東西 | 實測 |
+|---|---|
+| **按「移除選取」之後整個側欄的縮圖永久消失** | `remove_from_playlist` 會 `set_items` 重建整張清單 → 每個 item 的 `PIXMAP_ROLE` 全丟 → 重繪時重新要圖 → `request_thumbnail` 看到路徑已在 `_requested_thumbs` 裡直接 return。**工作永遠不會排隊**，只有重開資料夾才會恢復。改成 `Sidebar.remove_rows()` 用 `takeItem` 只拿掉那幾列，順便解掉捲動跳頂端、搜尋框被清空、選取全失 |
+| **篩選之後「移除選取」會刪掉看不見的列** | Qt 不會因為 `setHidden` 就取消選取（實測：hide 之後 `selectedItems()` 仍是三個）。選 3 列→打字篩選→畫面剩 1 列，但計數仍說「已選取 3 項」，按下去移除兩個看不見的。`_selected_paths()` 現在濾掉 hidden |
+| **預覽圖 popup 會被螢幕邊界切掉** | sheet 寬 `3*220+4*3` = **672px**，Qt 不會自動修正手動 `move()` 的 ToolTip 視窗。1366×768 筆電上視窗 x > 376 就開始切掉最右一欄 |
+| **縮圖以原尺寸常駐記憶體** | 320×180 存進 item，每次重繪才縮到 116×65。外部量測 1000 個**不同**檔案：基準 16.7 MB → **239.5 MB**；先縮到列尺寸則是 59.8 MB。（第一次量被 `QPixmap::load` 內建的 QPixmapCache 騙到——載入同一個檔 1000 次只佔一份，要用不同檔案才量得準。）順手發現 delegate 只開了 `Antialiasing` 沒開 `SmoothPixmapTransform`，縮圖一直是最近鄰縮的 |
+| **檔名排序不是自然排序** | `p.name.lower()` 字典序 → `['ep1','ep10','ep2']`。這個播放器就是給動畫資料夾用的 |
+| **縮圖固定抓第 3 秒** → 黑畫面／製作商 logo | 改 `--start=10%`。用 bundled 的 mpv 驗過：`--start  Relative time or percent position`，實跑 `--start=50%` 有出圖；100 秒的測試片 10% 與 3s 抓出來 sha 不同。而且百分比必定在檔案範圍內，原本「短於 3 秒就 fallback 到 0 秒」的第二次 spawn 變成真正的例外路徑 |
+| **開資料夾永遠從第 1 話開始** | `index = 0` 寫死，而 `mpv.conf` 沒有 `pause`，所以**每次啟動還原上次片庫都會自動播第 1 話**。改成跳過已看完的；啟動還原改成 `reload_player=False`，只列清單不播 |
+| 掃描每個檔多一次 stat | `iterdir()+is_file()` 對 `os.scandir`：3000 個本地檔 **47ms → 5ms**。本地這點差距低於這份文件其他項目撤回時用的尺，真正的理由是網路磁碟和遞迴掃描；附帶好處是 `os.walk` 預設不跟隨目錄符號連結，`rglob` 會（junction 迴圈） |
+| 副檔名清單漏掉整類片庫 | 補 `.m2ts/.mts/.rmvb/.rm/.3gp/.vob/.ogv/.asf/.divx` 等，mpv 本來就都能播 |
+| `0.95` 在 `ui.py` 和 `resume.py` 各寫一次 | 改用 `resume.WATCHED_THRESHOLD` |
+| 拖放 URI 解析在兩個檔案各一份 | 抽成 `ax_player/dnd.py` |
+
+新增：側欄右鍵選單（標記已看/未看、檔案總管中顯示、複製路徑）、`F5` 重掃、`Ctrl+O`、標題列視窗置頂鈕、hover 預覽圖上方顯示完整檔名。
+
+`tests/test_sidebar.py` 是新的——側欄過去**完全沒有測試**，上面前兩條就是靠手動測試永遠不會發現的那種 bug。
+
+### 這一輪查過、故意沒做的
+
+1. **`_current` 在播網址時是被 `Path()` 壓壞的字串**（`https://` → `https:/`）。看起來該修，**修了反而會壞**：`set_sort_mode` 用 `reload_player=self._current is None` 判斷，把它改成 `None` 會讓「播網址時改排序」去重載資料夾清單、打斷正在播的網址。維持現狀。
+2. **單一執行個體**（從檔案總管連開三個檔 = 三個 process、三份 GPU decode context）。要 `QLocalServer` + 參數轉送，不是順手能做完的，值得單獨開一輪。
+3. **排序升／降切換**。自然排序已經解掉實際的抱怨，多一顆按鈕的收益變小了。
+4. **列的 tooltip 顯示完整檔名**。hover 已經有 contact sheet popup（ToolTip 型視窗），再疊一個 tooltip 會打架 —— 改成把檔名畫在 popup 上方。
+5. **`QFileSystemWatcher` 自動重掃**。播放中自動改清單的互動太意外，`F5` 就夠。
+
+### 這一輪的環境陷阱（都撞到了）
+
+- **§6 說的 heredoc 吃反斜線是真的**：`"\n".join(...)` 寫進檔案變成真的換行，Python 直接語法錯誤。含反斜線的內容一律用 Write/Edit 工具。
+- **`ctypes` 預設把 HWND 當 32-bit**：`SetWindowPos` 第一次回 FALSE，就是 64-bit handle 被截掉。一定要設 `argtypes`。
+- **`QMenu.exec` 沒辦法從 Python 蓋掉**：測試想 stub 掉它，結果真的開了一個 modal menu 卡在那裡兩分鐘。改成把選單建構拆成 `build_row_menu()`，測試只看它回傳什麼。
+- **突變測試自己也會騙人**：第一次跑「把修法改壞、看測試會不會紅」全部顯示 CAUGHT —— 但那個 subprocess 用的是沒裝 pytest 的直譯器，每次都非零退出。**一定要先跑一次不突變的對照組**確認 harness 會回報 PASS。
+- 透過 Bash 呼叫 PowerShell 時 `$_` 會被 bash 先展開成 `unsetenv`。要用 PowerShell 工具。
+
 ### 曾列在這裡、v1.1.6 / v1.4.5 已經做完的
 
 `debug.log` 輪替、`snapshot_playback` 的 `vf` 只讀一次、UI 藏在系統匣時停止輪詢、contact sheet 原子寫入 —— 都在那兩版裡了。

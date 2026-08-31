@@ -73,5 +73,13 @@ def set_unwatched_only(on: bool) -> None:
     _s().setValue("library/unwatched_only", bool(on))
 
 
+def always_on_top() -> bool:
+    return _s().value("window/always_on_top", False, type=bool)
+
+
+def set_always_on_top(on: bool) -> None:
+    _s().setValue("window/always_on_top", bool(on))
+
+
 def flush() -> None:
     _s().sync()

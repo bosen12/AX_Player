@@ -64,18 +64,52 @@ def save_progress(video: str, pos: float, duration: float) -> None:
         if data.get(video) == entry:
             return
         data[video] = entry
-        # Written via a temp file and swapped in with os.replace: this rewrites
-        # the whole database, and it runs on every 5-second progress poll, so
-        # an in-place write is a standing chance for a crash or power loss to
-        # leave a truncated file -- which _load()'s ValueError guard then reads
-        # as "no data at all", wiping every video's progress and watched badge.
-        path = resume_db_path()
-        tmp = path.with_name(path.name + ".tmp")
+        _write(data)
+
+
+def set_watched(video: str, watched: bool) -> None:
+    """Mark a video watched (or not) by hand, from the sidebar's menu.
+
+    Unmarking deletes the entry outright rather than storing watched=False:
+    "not watched" and "never opened" should look identical in the list, and a
+    zeroed entry would otherwise keep the row's progress bar and duration
+    alive for a video the user just said they had not seen.
+
+    Marking without a known duration stores 0.0 for it, which the sidebar
+    reads as "no progress bar" while still drawing the check badge -- the
+    honest rendering of what is actually known here.
+    """
+    with _lock:
+        data = _load()
+        if not watched:
+            if data.pop(video, None) is None:
+                return
+        else:
+            previous = data.get(video)
+            duration = (
+                float(previous.get("duration") or 0.0) if isinstance(previous, dict) else 0.0
+            )
+            entry = {"pos": 0.0, "duration": duration, "watched": True}
+            if previous == entry:
+                return
+            data[video] = entry
+        _write(data)
+
+
+def _write(data: dict[str, dict]) -> None:
+    """Written via a temp file and swapped in with os.replace: this rewrites
+    the whole database, and it runs on every 5-second progress poll, so an
+    in-place write is a standing chance for a crash or power loss to leave a
+    truncated file -- which _load()'s ValueError guard then reads as "no data
+    at all", wiping every video's progress and watched badge.
+    """
+    path = resume_db_path()
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
         try:
-            tmp.write_text(json.dumps(data), encoding="utf-8")
-            os.replace(tmp, path)
+            tmp.unlink(missing_ok=True)
         except OSError:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+            pass
