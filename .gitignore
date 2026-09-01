@@ -24,3 +24,8 @@ __pycache__/
 # is not ours to commit -- it appeared here the first time a test run
 # constructed a real embedded mpv while Fluid Motion was running.
 /mpv-runtime/shaders/fluid_rife.vpy
+# Same: Fluid Motion installs its IPC script into the config dir of whichever
+# player it finds running. Useful here (it is what binds F3), but it is that
+# project's file to version, and bundling whatever happened to be installed at
+# build time would make the packaged exe depend on the build machine.
+/mpv-runtime/scripts/zz-fluid-ipc.lua
