@@ -450,9 +450,16 @@ class AXPlayerWindow(QWidget):
         # is what produced the white gap back when a Chromium view had to
         # resize over IPC to get out of the way).
         if on and not self.isFullScreen():
+            # showNormal() on the way out clears WindowMaximized as well as
+            # WindowFullScreen, so a maximized window came back at its restored
+            # size instead. Remember which of the two states to return to.
+            self._was_maximized = self.isMaximized()
             self.showFullScreen()
         elif not on and self.isFullScreen():
-            self.showNormal()
+            if getattr(self, "_was_maximized", False):
+                self.showMaximized()
+            else:
+                self.showNormal()
         self.titlebar.setVisible(not on)
         self.sidebar.setVisible(not on)
 

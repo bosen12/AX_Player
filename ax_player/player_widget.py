@@ -341,6 +341,16 @@ class PlayerWidget(QWidget):
         # actual failure, whatever it is, has to be observed from a real
         # run instead of guessed at again.
         debug_log.log(f"play_url: url={url!r} config_dir={default_mpv_root()} ytdlp={ytdlp_exe()}")
+        # "replace" leaves mpv holding a one-entry playlist, so the folder this
+        # used to mirror is gone from mpv but would still be sitting in
+        # _loaded. play_path() addresses mpv *by index* off that list: clicking
+        # the first sidebar row computes index 0, which a one-entry playlist
+        # accepts, so the URL restarts instead of the file being clicked -- and
+        # play_path returns True, so open_folder()'s self-heal never runs. Rows
+        # 1+ raise IndexError and do self-heal, which is why only the first row
+        # looked stuck. remove_paths() has the same dependency: 移除選取 on row
+        # 0 would issue playlist-remove 0 and drop the playing URL.
+        self._loaded = []
         try:
             self._mpv.command("loadfile", url, "replace")
             debug_log.log("play_url: loadfile command sent OK")

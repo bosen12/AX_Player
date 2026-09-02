@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -46,7 +47,14 @@ def _grab_frame(video: Path, seek: str, dest: Path, *, width: int) -> Path | Non
     if exe is None:
         return None
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp_dir = dest.parent / f".tmp-{dest.stem}"
+    # Per process, not just per video: dest.stem is the content hash, so two
+    # AX Players grabbing the same file (three files opened from Explorer is
+    # three processes -- there is no single-instance handover) picked the same
+    # scratch dir. The first one's finally-block unlink emptied it under the
+    # second, whose glob then found nothing, and the row it belonged to keeps
+    # its grey placeholder for the rest of the session because the path is
+    # already in _requested_thumbs and is never retried.
+    tmp_dir = dest.parent / f".tmp-{dest.stem}-{os.getpid()}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
         # --vo=image writes numbered frames to --vo-image-outdir on its own;

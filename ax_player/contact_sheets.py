@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -106,11 +107,37 @@ def probe_duration(video: Path) -> float | None:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
+def _clear_scratch(tmp_dir: Path) -> None:
+    """Empty a frame-grab scratch directory and remove it.
+
+    Every entry is guarded on its own. A leftover *directory* -- a fallback
+    grab's own scratch dir that outlived its rmdir -- makes unlink raise
+    PermissionError on Windows, and with one try around the whole loop that
+    single entry aborted the sweep *and* skipped the rmdir, leaking the
+    directory and every frame in it until cache's hourly scratch sweep got to
+    it an hour later.
+    """
+    for leftover in tmp_dir.glob("*"):
+        try:
+            if leftover.is_dir():
+                shutil.rmtree(leftover, ignore_errors=True)
+            else:
+                leftover.unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        tmp_dir.rmdir()
+    except OSError:
+        pass
+
+
 def _grab_frame_at(video: Path, seconds: float, dest: Path) -> Path | None:
     exe = mpv_exe()
     if exe is None:
         return None
-    tmp_dir = dest.parent / f".tmp-{dest.stem}"
+    # Per process: see the note in thumbnails._grab_frame. Same hash, same
+    # directory, and the loser's frames are deleted out from under it.
+    tmp_dir = dest.parent / f".tmp-{dest.stem}-{os.getpid()}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
@@ -145,12 +172,7 @@ def _grab_frame_at(video: Path, seconds: float, dest: Path) -> Path | None:
     except (subprocess.SubprocessError, OSError):
         return None
     finally:
-        try:
-            for leftover in tmp_dir.glob("*"):
-                leftover.unlink(missing_ok=True)
-            tmp_dir.rmdir()
-        except OSError:
-            pass
+        _clear_scratch(tmp_dir)
 
 
 def _settled_frames(
@@ -281,7 +303,7 @@ def generate_contact_sheet(video: Path, frame_count: int = FRAME_COUNT) -> Path 
         span = END_FRACTION - START_FRACTION
         fractions = [START_FRACTION + span * i / (frame_count - 1) for i in range(frame_count)]
 
-    tmp_dir = dest.parent / f".compose-{dest.stem}"
+    tmp_dir = dest.parent / f".compose-{dest.stem}-{os.getpid()}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     frames: list[tuple[QImage, str]] = []
     try:
@@ -390,9 +412,4 @@ def generate_contact_sheet(video: Path, frame_count: int = FRAME_COUNT) -> Path 
                 pass
         return dest
     finally:
-        try:
-            for leftover in tmp_dir.glob("*"):
-                leftover.unlink(missing_ok=True)
-            tmp_dir.rmdir()
-        except OSError:
-            pass
+        _clear_scratch(tmp_dir)

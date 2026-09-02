@@ -269,3 +269,99 @@ def test_a_fully_watched_folder_goes_back_to_the_top(tmp_path):
     w = types.SimpleNamespace(_playlist=playlist)
 
     assert AXPlayerWindow._first_unwatched_index(w) == 0
+
+
+# -- fullscreen gives back the state it took --------------------------------
+def _fullscreen_stub(maximized):
+    calls = []
+    window = types.SimpleNamespace(
+        _fullscreen=False,
+        isMaximized=lambda: maximized,
+        showFullScreen=lambda: calls.append("full"),
+        showMaximized=lambda: calls.append("max"),
+        showNormal=lambda: calls.append("normal"),
+        titlebar=types.SimpleNamespace(setVisible=lambda _v: None),
+        sidebar=types.SimpleNamespace(setVisible=lambda _v: None),
+    )
+    window.isFullScreen = lambda: window._fullscreen
+    return window, calls
+
+
+def test_leaving_fullscreen_gives_a_maximized_window_back_maximized():
+    """showNormal() clears WindowMaximized as well as WindowFullScreen, so
+    maximize -> uosc fullscreen -> fullscreen again handed back the restored
+    1320x780 window instead of the maximized one."""
+    window, calls = _fullscreen_stub(maximized=True)
+
+    AXPlayerWindow._on_mpv_fullscreen(window, True)
+    window._fullscreen = True
+    AXPlayerWindow._on_mpv_fullscreen(window, False)
+
+    assert calls == ["full", "max"]
+
+
+def test_a_windowed_player_still_comes_back_windowed():
+    window, calls = _fullscreen_stub(maximized=False)
+
+    AXPlayerWindow._on_mpv_fullscreen(window, True)
+    window._fullscreen = True
+    AXPlayerWindow._on_mpv_fullscreen(window, False)
+
+    assert calls == ["full", "normal"]
+
+
+# -- a URL is not part of the folder playlist ------------------------------
+def _detached_player(loaded):
+    """Enough of PlayerWidget for the unbound methods under test.
+
+    play_url/play_path/remove_paths are pure playlist bookkeeping; building the
+    real widget would start libmpv and open a window.
+    """
+    sent = []
+    return types.SimpleNamespace(
+        _loaded=list(loaded),
+        _sent=sent,
+        _mpv=types.SimpleNamespace(command=lambda *a: sent.append(a)),
+        _mpv_cmd=lambda *a: sent.append(a),
+    )
+
+
+def test_playing_a_url_stops_the_first_row_replaying_it(tmp_path):
+    """loadfile "replace" leaves mpv with a one-entry playlist.
+
+    play_path addresses mpv by *index* into _loaded, so with the folder still
+    listed there, clicking row 0 computed index 0 -- which the one-entry
+    playlist accepts -- and restarted the URL instead of playing the file. It
+    returned True as well, so open_folder()'s self-heal never ran. Rows 1+
+    raised IndexError and did self-heal, which is why only the first row
+    looked stuck.
+    """
+    from ax_player.player_widget import PlayerWidget
+
+    playlist = [tmp_path / f"ep{i}.mkv" for i in range(3)]
+    widget = _detached_player(playlist)
+
+    PlayerWidget.play_url(widget, "https://example.com/live.m3u8")
+
+    assert PlayerWidget.play_path(widget, playlist[0]) is False, (
+        "row 0 still resolved against the folder mpv no longer holds"
+    )
+    assert not any(a[0] == "playlist-play-index" for a in widget._sent), (
+        "an index was sent for a playlist that is now just the URL"
+    )
+
+
+def test_removing_the_first_row_after_a_url_does_not_drop_the_stream(tmp_path):
+    """Same stale list, second consumer: 移除選取 on row 0 would have issued
+    playlist-remove 0, which is the URL that is playing."""
+    from ax_player.player_widget import PlayerWidget
+
+    playlist = [tmp_path / f"ep{i}.mkv" for i in range(3)]
+    widget = _detached_player(playlist)
+
+    PlayerWidget.play_url(widget, "https://example.com/live.m3u8")
+    PlayerWidget.remove_paths(widget, {playlist[0]})
+
+    assert not any(a[0] == "playlist-remove" for a in widget._sent), (
+        "removed an entry by an index that no longer means what it did"
+    )

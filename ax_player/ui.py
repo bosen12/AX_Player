@@ -26,6 +26,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
+    QCursor,
     QFont,
     QKeySequence,
     QPainter,
@@ -63,7 +64,14 @@ PAPER_2 = "#1d1815"
 PAPER_3 = "#26201a"
 INK = "#ece4d9"
 MUTED = "#a99781"
-FAINT = "#7b6b5a"
+# Lightened from #7b6b5a, which measured 3.43:1 on PAPER_2 and 3.6:1 on PAPER
+# -- under the 4.5:1 WCAG AA needs for text below 18.7px. It is not only the
+# small labels: _RowDelegate paints every *watched* episode's filename in it at
+# 13px, so the rows a returning user scans most were the least legible ones.
+# This value measures 4.82:1 on PAPER_2 and 5.06:1 on PAPER. (#8f7e6a, the
+# obvious next step up, only reaches 4.49 on PAPER_2 -- close enough to look
+# right and still short.)
+FAINT = "#948373"
 ACCENT = "#e3a75c"
 ACCENT_HI = "#f0bd7d"
 ACCENT_INK = "#191410"
@@ -84,13 +92,32 @@ ROW_H = THUMB_H + ROW_PAD * 2 + 2
 class _ChromeButton(QAbstractButton):
     """Window-control button, glyph drawn rather than shipped as an image."""
 
+    # The glyph is painted, so there is no text for a screen reader to read and
+    # no automatic name to fall back on: without these, all six announce as an
+    # unnamed "button". Qt maps a tooltip to QAccessible::Description, which is
+    # why the three that had one were not completely silent -- but description
+    # is not name, and minimize/maximize/close had neither.
+    LABELS = {
+        "fluid": "切換 Fluid Motion 補幀",
+        "stats": "播放診斷",
+        "pin": "視窗置頂",
+        "minimize": "最小化",
+        "maximize": "最大化",
+        "close": "關閉",
+    }
+
     def __init__(self, kind: str, parent: QWidget | None = None, *, width: int = 46):
         super().__init__(parent)
         self._kind = kind
         self._active = False
         self.setFixedWidth(width)
         self.setCursor(Qt.CursorShape.ArrowCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # TabFocus, not NoFocus: these were unreachable without a mouse, and
+        # for 視窗置頂 and 播放診斷 there was no other way in at all -- Alt+F4
+        # covers close and nothing covered the rest. Click focus stays off so
+        # a mouse user never sees a focus ring they did not ask for.
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setAccessibleName(self.LABELS.get(kind, kind))
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
     def set_active(self, on: bool) -> None:
@@ -114,6 +141,17 @@ class _ChromeButton(QAbstractButton):
             tint = QColor(ACCENT)
             tint.setAlphaF(0.14)
             painter.fillRect(self.rect(), tint)
+
+        if self.hasFocus():
+            # Nothing else marks the focused control: the glyph is painted by
+            # hand, so Qt draws no platform focus rectangle for it. Tabbing
+            # through the titlebar would otherwise move an invisible cursor and
+            # Space would activate whatever it had reached.
+            ring = QPen(QColor(ACCENT))
+            ring.setWidth(2)
+            painter.setPen(ring)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
 
         if self._kind == "close" and hovered:
             stroke = QColor("#f7f7f7")
@@ -289,6 +327,31 @@ PIXMAP_ROLE = Qt.ItemDataRole.UserRole + 1
 PROGRESS_ROLE = Qt.ItemDataRole.UserRole + 2
 WATCHED_ROLE = Qt.ItemDataRole.UserRole + 3
 PLAYING_ROLE = Qt.ItemDataRole.UserRole + 4
+
+
+def refresh_accessible_text(item: QListWidgetItem) -> None:
+    """Restate a row's painted state as text a screen reader can read.
+
+    Everything that tells one row from another -- the watched badge, the
+    playing rail, the progress bar -- exists only inside _RowDelegate.paint.
+    The accessible name falls back to DisplayRole, which is the bare filename,
+    so without this a blind user cannot tell what is playing, what is finished,
+    or where they left off.
+
+    AccessibleTextRole and not a tooltip: §7 rejected row tooltips because they
+    fight the contact-sheet popup for the same hover. This is screen-reader
+    only and never renders, so that objection does not apply.
+    """
+    parts = [str(item.data(Qt.ItemDataRole.DisplayRole) or "")]
+    if item.data(PLAYING_ROLE):
+        parts.append("播放中")
+    if item.data(WATCHED_ROLE):
+        parts.append("已看完")
+    else:
+        ratio = float(item.data(PROGRESS_ROLE) or 0.0)
+        if ratio > 0:
+            parts.append(f"已看 {round(ratio * 100)}%")
+    item.setData(Qt.ItemDataRole.AccessibleTextRole, " · ".join(parts))
 
 
 class _RowDelegate(QStyledItemDelegate):
@@ -781,7 +844,16 @@ class Sidebar(QWidget):
         # leaving the list entirely (mouse exits the viewport without
         # crossing into another row) needs its own signal -- an event filter
         # on the viewport for QEvent.Leave.
+        #
+        # Blank viewport below the last row is a third case, and neither of
+        # those covers it: Qt emits entered() only for a valid index, so
+        # sliding off a row into empty space emits viewportEntered() and no
+        # Leave at all. The list has stretch 1, so a short folder in a tall
+        # window leaves a large blank area right under the rows, and the sheet
+        # -- a top-level ToolTip with WindowStaysOnTopHint -- stayed parked
+        # over the video until the cursor re-entered a row or left the list.
         self._list.itemEntered.connect(self._on_item_entered)
+        self._list.viewportEntered.connect(self._on_viewport_entered)
         self._list.viewport().installEventFilter(self)
         self._hover_path: str | None = None
         self._hover_delay = QTimer(self)
@@ -868,6 +940,7 @@ class Sidebar(QWidget):
             cached = self._thumbs.get(entry["path"])
             if cached is not None:
                 item.setData(PIXMAP_ROLE, cached)
+            refresh_accessible_text(item)
             self._list.addItem(item)
             self._rows[entry["path"]] = item
 
@@ -926,6 +999,7 @@ class Sidebar(QWidget):
         self._playing = path
         for key, item in self._rows.items():
             item.setData(PLAYING_ROLE, key == path)
+            refresh_accessible_text(item)
         current = self._rows.get(path)
         if current is not None:
             self._list.scrollToItem(current, QAbstractItemView.ScrollHint.EnsureVisible)
@@ -937,6 +1011,7 @@ class Sidebar(QWidget):
         ratio = pos / duration
         item.setData(PROGRESS_ROLE, ratio)
         item.setData(WATCHED_ROLE, ratio >= resume.WATCHED_THRESHOLD)
+        refresh_accessible_text(item)
 
     # -- interaction -----------------------------------------------------
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
@@ -988,11 +1063,32 @@ class Sidebar(QWidget):
         # never covers what triggered it.
         return self.mapToGlobal(QPoint(self.width(), 8))
 
+    def _pointer_is_over_rows(self) -> bool:
+        """True when the physical cursor is inside the list's viewport.
+
+        The one thing that separates a right-click from a keyboard-raised menu
+        without guessing at Qt's synthesised position: a click cannot have come
+        from a viewport the pointer is not in. Keeps the mouse path exactly as
+        it was -- right-clicking blank space still opens nothing.
+        """
+        viewport = self._list.viewport()
+        return viewport.rect().contains(viewport.mapFromGlobal(QCursor.pos()))
+
+    def _dismiss_hover(self) -> None:
+        """Forget the pending hover and take the sheet down."""
+        self._hover_delay.stop()
+        self._hover_path = None
+        self._sheet_popup.hide_now()
+
+    def _on_viewport_entered(self) -> None:
+        # The cursor is inside the list but over no row -- the blank area under
+        # a short folder. Qt reports that here rather than through entered() or
+        # Leave, so without this the sheet for the last row hovered stays up.
+        self._dismiss_hover()
+
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if obj is self._list.viewport() and event.type() == event.Type.Leave:
-            self._hover_delay.stop()
-            self._hover_path = None
-            self._sheet_popup.hide_now()
+            self._dismiss_hover()
         return super().eventFilter(obj, event)
 
     def _on_item_activated(self, item: QListWidgetItem) -> None:
@@ -1001,8 +1097,27 @@ class Sidebar(QWidget):
             self.play_requested.emit(str(path))
 
     # -- row menu ----------------------------------------------------------
-    def _show_row_menu(self, pos) -> None:
+    def _menu_target(self, pos) -> QListWidgetItem | None:
+        """Which row a context-menu request is about.
+
+        Split out of _show_row_menu so it can be tested: that one ends in
+        QMenu.exec, which cannot be stubbed from Python and parks the test on a
+        real modal menu.
+        """
         item = self._list.itemAt(pos)
+        if item is None and not self._pointer_is_over_rows():
+            # Raised from the keyboard (Menu key / Shift+F10). Qt synthesises
+            # the position from the focus widget rather than from currentIndex,
+            # so itemAt() lands on whatever happens to sit there -- blank space,
+            # or a row the user never arrowed to, which the selection rewrite
+            # in _show_row_menu would then make current. Arrow to episode 20,
+            # press Menu, and 標記已看 acted on the row at the top of the
+            # viewport instead.
+            return self._list.currentItem()
+        return item
+
+    def _show_row_menu(self, pos) -> None:
+        item = self._menu_target(pos)
         if item is None:
             return
         # Right-clicking a row outside the current selection acts on that row,
@@ -1056,6 +1171,7 @@ class Sidebar(QWidget):
                 # Matches what resume.set_watched stores: a finished episode
                 # should not also sit at "resume from 23:58".
                 item.setData(PROGRESS_ROLE, 0.0)
+            refresh_accessible_text(item)
         self._apply_filter()
 
     def _focus_search(self) -> None:
@@ -1141,6 +1257,13 @@ QPushButton {{
 }}
 QPushButton:hover {{ border-color: {ACCENT}; color: {ACCENT}; }}
 QPushButton#danger:hover {{ border-color: {DANGER}; color: {DANGER}; }}
+/* Focus rings, drawn explicitly: once a widget carries a stylesheet with a
+   border, QStyleSheetStyle stops painting the platform focus rectangle. Only
+   QLineEdit#search had one, so tabbing from the search box through 開啟資料夾,
+   檔案, 網址, 含子資料夾, 只看未看完 and 排序 moved an invisible cursor and
+   Space activated whatever it had reached. */
+QPushButton:focus {{ border-color: {ACCENT}; color: {ACCENT}; }}
+QPushButton#danger:focus {{ border-color: {DANGER}; color: {DANGER}; }}
 
 QCheckBox#recursive {{ color: {MUTED}; font-size: 11px; padding-left: 8px; }}
 QCheckBox#recursive::indicator {{
@@ -1150,6 +1273,8 @@ QCheckBox#recursive::indicator {{
     background: {PAPER_3};
 }}
 QCheckBox#recursive::indicator:hover {{ border-color: {ACCENT}; }}
+QCheckBox#recursive:focus {{ color: {ACCENT}; }}
+QCheckBox#recursive:focus::indicator {{ border-color: {ACCENT}; }}
 QCheckBox#recursive::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
 
 QLabel#folderName {{
@@ -1172,6 +1297,7 @@ QComboBox#sort {{
     font-size: 11px;
 }}
 QComboBox#sort:hover {{ border-color: {ACCENT}; }}
+QComboBox#sort:focus {{ border-color: {ACCENT}; color: {ACCENT}; }}
 /* Qt draws its own arrow here: the CSS border-triangle trick renders as a
    stray dash rather than a triangle in Qt style sheets. */
 QComboBox#sort::drop-down {{ border: none; width: 18px; }}

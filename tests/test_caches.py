@@ -75,26 +75,48 @@ def test_a_sheet_is_never_written_straight_onto_its_cache_path(tmp_path, monkeyp
     """Saving onto dest leaves a window where a half-written JPEG is on disk,
     and it passes the "exists and is non-empty" check -- so that broken image
     is served for every hover from then on, since nothing revisits a sheet
-    once one exists."""
-    seen = []
+    once one exists.
+
+    The version this replaces never called generate_contact_sheet at all: it
+    installed the spy, then did its own img.save(staging) and asserted the spy
+    had seen `staging`. That is a tautology over the test's own line -- putting
+    `sheet.save(str(dest))` back in contact_sheets.py left it green, so the
+    only cover for the v1.1.6 fix was cover for nothing.
+    """
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"x" * 64)
+
     real_save = contact_sheets.QImage.save
+    seen: list[Path] = []
+
+    def fake_grab(_video, _first, _step, count, tmp_dir):
+        """Real JPEGs on disk, written through the unpatched save so the
+        frames the composer reads do not show up as sheet writes."""
+        made = []
+        for i in range(count):
+            frame = Path(tmp_dir) / f"f{i:02d}.jpg"
+            image = contact_sheets.QImage(160, 90, contact_sheets.QImage.Format.Format_RGB32)
+            image.fill(contact_sheets.QColor("#334455"))
+            assert real_save(image, str(frame), "JPG", 85)
+            made.append(frame)
+        return made
 
     def spy(self, path, *a, **kw):
         seen.append(Path(path))
         return real_save(self, path, *a, **kw)
 
+    monkeypatch.setattr(contact_sheets, "probe_duration", lambda _v: 120.0)
+    monkeypatch.setattr(contact_sheets, "_grab_evenly_spaced", fake_grab)
     monkeypatch.setattr(contact_sheets.QImage, "save", spy)
 
-    dest = tmp_path / "abc_9.jpg"
-    staging = dest.with_name(f".part-{dest.name}")
-    img = contact_sheets.QImage(32, 32, contact_sheets.QImage.Format.Format_RGB32)
-    img.fill(contact_sheets.QColor("#123456"))
-    assert img.save(str(staging), "JPG", 85)
-    os.replace(staging, dest)
+    dest = contact_sheets.generate_contact_sheet(video)
 
-    assert seen and seen[0] != dest, "bytes went straight to the cache path"
-    assert dest.is_file()
-    assert not staging.exists()
+    assert dest is not None, "the sheet was not produced at all"
+    assert dest.is_file() and dest.stat().st_size > 0
+    assert seen, "the composed sheet was never saved"
+    assert dest not in seen, "bytes went straight to the cache path"
+    assert seen[-1].name.startswith(".part-"), f"unexpected staging name: {seen[-1].name}"
+    assert not seen[-1].exists(), "staging file left behind"
 
 
 def test_debug_log_rotates_and_keeps_one_generation(monkeypatch):

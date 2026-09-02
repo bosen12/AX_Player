@@ -206,3 +206,101 @@ def test_the_menu_never_offers_to_delete_anything_from_disk(sidebar):
 
     assert "刪除" not in labels or "不刪檔案" in labels
     assert "從清單移除（不刪檔案）" in labels
+
+
+# -- hover preview dismissal ----------------------------------------------
+def test_sliding_off_a_row_into_blank_space_takes_the_sheet_down(sidebar):
+    """itemEntered fires only for a *valid* index and Leave only when the
+    cursor exits the viewport, so the blank area under a short folder was
+    covered by neither -- the sheet stayed parked over the video. The list has
+    stretch 1, so that blank area is as tall as the window.
+
+    Emitting the signal rather than calling the handler: a handler that is
+    never connected would pass the other way round.
+    """
+    sidebar._hover_path = PATHS[0]
+    sidebar._hover_delay.start()
+
+    sidebar._list.viewportEntered.emit()
+
+    assert sidebar._hover_path is None, "still waiting to show a sheet for a row"
+    assert not sidebar._hover_delay.isActive(), "the hover-intent timer kept running"
+    assert not sidebar._sheet_popup.isVisible()
+
+
+# -- which row a context menu is about ------------------------------------
+def test_a_keyboard_raised_menu_acts_on_the_current_row(sidebar, monkeypatch):
+    """Qt synthesises the position for a Menu-key context request from the
+    focus widget, not from currentIndex, so itemAt() answers with whatever sits
+    at that point -- and _show_row_menu then *rewrites the selection* onto it.
+    Arrow to a row, press Menu, and the menu acted on a different file.
+    """
+    monkeypatch.setattr(sidebar, "_pointer_is_over_rows", lambda: False)
+    sidebar._list.setCurrentRow(2)
+
+    target = sidebar._menu_target(QPoint(10_000, 10_000))
+
+    assert target is not None, "a keyboard menu with no row under the point got nothing"
+    assert target.data(ui.PATH_ROLE) == PATHS[2]
+
+
+# -- what a screen reader gets --------------------------------------------
+def _accessible(sidebar, path):
+    return sidebar._rows[path].data(Qt.ItemDataRole.AccessibleTextRole)
+
+
+def test_a_row_announces_more_than_its_filename(sidebar):
+    """The watched badge, the playing rail and the progress bar are painted by
+    _RowDelegate and exist nowhere else, so the accessible name fell back to
+    DisplayRole -- the bare filename. A screen-reader user could not tell what
+    was playing, what was finished, or where they left off."""
+    sidebar.set_playing(PATHS[1])
+    sidebar.set_progress(PATHS[2], 30.0, 100.0)
+    sidebar.set_watched([PATHS[3]], True)
+
+    assert "播放中" in _accessible(sidebar, PATHS[1])
+    assert "已看 30%" in _accessible(sidebar, PATHS[2])
+    assert "已看完" in _accessible(sidebar, PATHS[3])
+    # An untouched row still says its name and claims nothing else.
+    plain = _accessible(sidebar, PATHS[0])
+    assert Path(PATHS[0]).name in plain
+    assert "播放中" not in plain and "已看" not in plain
+
+
+def test_dimmed_text_stays_readable(sidebar):
+    """FAINT is not just for small labels: _RowDelegate paints every watched
+    episode's filename in it at 13px, so the rows a returning user scans most
+    were the least legible. WCAG AA wants 4.5:1 below 18.7px.
+
+    Computed rather than pinned to a hex string, so a future palette change is
+    judged on the thing that matters instead of on whether it matched a
+    literal.
+    """
+
+    def luminance(value):
+        value = value.lstrip("#")
+        channels = [int(value[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        channels = [
+            c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels
+        ]
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    def contrast(fg, bg):
+        high, low = sorted((luminance(fg), luminance(bg)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    for background in (ui.PAPER, ui.PAPER_2):
+        for colour in (ui.FAINT, ui.MUTED, ui.INK):
+            assert contrast(colour, background) >= 4.5, (
+                f"{colour} on {background} is {contrast(colour, background):.2f}:1"
+            )
+
+
+def test_right_clicking_blank_space_still_opens_nothing(sidebar, monkeypatch):
+    """The mouse path is unchanged: the fallback is gated on the pointer not
+    being over the viewport, so a right-click on empty space below the rows
+    must not conjure a menu for whatever happens to be current."""
+    monkeypatch.setattr(sidebar, "_pointer_is_over_rows", lambda: True)
+    sidebar._list.setCurrentRow(2)
+
+    assert sidebar._menu_target(QPoint(10_000, 10_000)) is None
