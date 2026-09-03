@@ -262,3 +262,68 @@ def test_the_temp_file_is_per_process():
     assert seen, "nothing was swapped in"
     assert str(os.getpid()) in seen[0], f"temp name is not per-process: {seen[0]}"
     assert not list(resume_db_path().parent.glob("*.tmp")), "temp file left behind"
+
+
+# -- two decisions a mutation sweep found nothing pinning --------------------
+def test_the_watched_cutoff_is_one_constant_and_both_sides_use_it():
+    """CLAUDE.md: "WATCHED_THRESHOLD lives here; don't re-hardcode 0.95".
+
+    Two places decide "watched": resume.save_progress writes the flag, and
+    ui.set_progress paints the badge from the same ratio. A copy of the literal
+    in either one drifts silently -- the store and the row would disagree about
+    the same video, and the only symptom is a tick that does not match the list
+    filter.
+
+    Pinned on the *boundary the constant produces*, not on 0.95, so moving the
+    threshold deliberately stays green and hard-coding a second copy does not.
+    """
+    from ax_player import resume, ui
+
+    threshold = resume.WATCHED_THRESHOLD
+    duration = 1000.0
+    just_under = duration * threshold - 1
+    just_over = duration * threshold + 1
+
+    resume.save_progress(r"C:\V\under.mkv", just_under, duration)
+    resume.save_progress(r"C:\V\over.mkv", just_over, duration)
+    assert resume.get_progress(r"C:\V\under.mkv")["watched"] is False
+    assert resume.get_progress(r"C:\V\over.mkv")["watched"] is True
+
+    # set_progress is the sidebar half of the same decision, and it has to be
+    # reading the constant rather than a literal of its own. Scoped to that
+    # method: ui.py has an unrelated 0.95 in the diagnostics verdict (output
+    # fps against source fps), and asserting over the whole file matched it.
+    ui_src = Path(ui.__file__).read_text(encoding="utf-8")
+    start = ui_src.index("def set_progress")
+    body = ui_src[start : ui_src.index(chr(10) + "    def ", start + 1)]
+    assert "resume.WATCHED_THRESHOLD" in body, "the sidebar decides watched on its own"
+    assert "0.95" not in body, "a second copy of the cutoff is back in set_progress"
+
+
+def test_the_thumbnail_seek_is_a_fraction_of_the_file_not_a_fixed_time():
+    """§7 measured this one: a fixed three seconds lands on the studio logo, a
+    black frame, or the first bar of an OP -- which is what whole folders of
+    the sidebar were showing.
+
+    A percentage is also inside the file *by construction*, which is what makes
+    the second pass a real fallback: the frame-0 retry stops running for every
+    clip shorter than the old fixed seek and only runs when mpv could not work
+    out a duration at all.
+
+    So the property pinned here is "a fraction", not the digits. Moving it to
+    15% is a decision and stays green; going back to a wall-clock offset is the
+    regression and does not.
+    """
+    from ax_player import thumbnails
+
+    assert thumbnails.THUMB_SEEK.endswith("%"), (
+        f"THUMB_SEEK is {thumbnails.THUMB_SEEK!r}, a fixed offset again"
+    )
+    assert 0 < float(thumbnails.THUMB_SEEK.rstrip("%")) < 100
+
+    src = Path(thumbnails.__file__).read_text(encoding="utf-8")
+    start = src.index("for seek in (")
+    order = src[start : src.index(")", start)]
+    assert "THUMB_SEEK" in order and order.index("THUMB_SEEK") < order.index('"00:00:00"'), (
+        "the percentage has to be tried first; frame 0 is the fallback"
+    )
