@@ -1185,3 +1185,50 @@ CLAUDE.md 把它列為維護陷阱:「更新 thumbfast 要重新套用三處手�
 | 版本 fallback 改回 v1.4.7 | **CAUGHT** |
 
 **這一輪連續三輪都在同一條線上**:§9.17 說「能推導的不要手寫」,§9.18 說「錨點要指對檔案」,這一輪把兩條都用上,對象換成公開表面。三份公開文件的漂移都是同一個形狀 —— **沒有人會為文件跑測試,所以文件會比程式碼老。**
+
+### 9.20 09-04:打包層 —— 出貨的東西對不對
+
+最後一個沒讀過的表面:兩個 `.spec`、`packaging/`、`setup_mpv.py`、`mpv_fetch.py`。**spec 決定了什麼會出貨**,而在原始碼樹裡一切都在,所以少放一個資料檔只會在打包版壞掉。
+
+#### 對得上、不必再查的
+
+**兩個 spec 的 `datas` 都是完整的。** AX 的 `mpv-runtime/` 實際內容是 `LICENSES / NOTICE.md / fonts / input.conf / mpv.conf / script-opts / scripts / shaders` 加三個二進位檔(`mpv.exe`、`libmpv-2.dll`、`yt-dlp.exe`)。spec 列了前八項、刻意排除後三項(gitignore 也一致,由 `setup_mpv.py` / `mpv_fetch.py` 現抓)。**非二進位的部分 100% 覆蓋,沒有缺口。** FM 只有 `ui/` 和 `resources/` 兩個資產目錄,兩個都在。
+
+**種子邏輯沒有清單漂移的風險。** `ensure_runtime()` 是 `for item in bundled_source.iterdir()` —— 整個目錄照抄,不是寫死的清單,所以 spec 加東西不會漏種。
+
+#### 找到的:`yt-dlp` 會在「其他一切都正常」的安裝上缺席
+
+`ensure_runtime()` 把三個二進位檔一起抓,但開頭是:
+
+```python
+if (default_mpv_root() / "libmpv-2.dll").is_file():
+    return
+```
+
+**任何一個候選 root 已經有 libmpv-2.dll,就整段不跑。** 一台有自己 `C:\mpv` 的機器因此永遠不會執行到 `fetch_binaries`。那個安裝如果沒有自己的 `yt-dlp.exe`:
+
+1. `ytdlp_exe()` → None
+2. `player_widget` 的 `script_opts` 少掉 `ytdl_hook-ytdl_path`
+3. mpv 的 ytdl_hook 退回找 PATH 上的裸 `yt-dlp`
+4. 「開啟網址」對直連媒體檔正常,對需要解析的網址**靜靜失敗**
+
+**這正是 `play_url` 的日誌當初為了什麼加的那種回報的形狀。** 它的註解寫著「every failure report for this feature turned out impossible to diagnose blind... every source-checkout reproduction attempt played back fine」——**而它在原始碼 checkout 下本來就重現不出來**,因為那裡的 `mpv-runtime/` 永遠有 `yt-dlp.exe`(`setup_mpv.py` 抓過了)。
+
+**在這台機器上重現不出來。** 查過:`C:\mpv\yt-dlp.exe` **存在**(使用者手工組的那份剛好有),而 `yt-dlp` 不在 PATH 上。所以機制成立、路徑可達,但這台機器剛好躲過。
+
+**沒有改行為。** 往別人的 `C:\mpv` 裡塞檔案不是這裡該做的事(可能唯讀,而且那是使用者自己的安裝),而把 yt-dlp 改抓進 `bundled_mpv_root()` 再加 fallback 是個真的修法,但那是一次網路下載的行為變更,建立在一個我重現不出來的假設上。**按 §5 的尺,這種時候該做的是讓它診斷得出來,不是猜著改。**
+
+改的是:`_log_mpv_runtime()` 那一行補上 `ytdlp=` 欄位。那個函式的工作本來就是「記下哪個 root 贏了、它能做什麼」,而 yt-dlp 是清單裡唯一一個**在其他每項都是 True 的時候**會是 False 的能力——那個對比本身就是診斷。
+
+新增 `tests/test_runtime_log.py`,三條,其中一條是推導式的(§9.17 的規矩):**`mpv_fetch` 抓的每一個二進位檔,都必須在這行日誌裡有對應欄位**。以後多抓一個而沒補欄位,就會在這個日誌唯一存在的情境裡靜靜地不被回報。
+
+| 突變 | 結果 |
+|---|---|
+| 拿掉 `ytdlp=` 欄位 | **CAUGHT**(三條全紅) |
+| 欄位寫死成 `True` | **CAUGHT**(只有第一條紅——證明它自己站得住,不是靠另外兩條) |
+
+第二個突變是刻意加的:三條測試同時紅,分不出哪一條真的在測東西。
+
+#### 留給你的一句話
+
+如果日後有人回報「開啟網址不能用」,**先要 `debug.log` 的第一行**。`ytdlp=False` 加上 `libmpv=True mpv_exe=True`,就是上面這條路徑,而修法是往那個 root 放一個 `yt-dlp.exe`(或改成抓進 `bundled_mpv_root()` 並讓 `ytdlp_exe()` 也找那裡)。
