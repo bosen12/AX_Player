@@ -614,9 +614,13 @@ class AXPlayerWindow(QWidget):
         again. The two look like they should match and must not: a sheet is
         requested by hovering a row -- a deliberate act, already debounced --
         while a thumbnail is requested from _RowDelegate.paint, which runs on
-        every repaint. Measured: 30 repaints of a row with no thumbnail make
-        30 calls here, so this set is the only thing between an un-grabbable
-        file and two mpv subprocesses per repaint for as long as it is on
+        every repaint.
+
+        Sidebar._queue_thumb absorbs the repaints inside a single event-loop
+        turn (measured: 30 paints, 1 request), but not across turns -- ten
+        paints in ten turns are ten requests, which is what scrolling past an
+        un-grabbable file looks like. So this set is what stands between such
+        a file and two mpv subprocesses per turn for as long as its row is on
         screen.
 
         The cost of keeping failures in is a row that stays grey until the

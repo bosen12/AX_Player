@@ -466,9 +466,11 @@ def test_with_no_folder_open_it_only_remembers_the_setting(monkeypatch):
 # -- the two request sets are not the same rule, on purpose ----------------
 def test_a_thumbnail_is_grabbed_once_per_file_however_often_the_row_repaints():
     """_RowDelegate.paint asks for a thumbnail every time it paints a row
-    without one -- measured at 30 requests for 30 repaints. This set is the
-    only thing between an un-grabbable file and two mpv subprocesses per
-    repaint for as long as it is on screen.
+    without one. Sidebar._queue_thumb absorbs the repaints inside one
+    event-loop turn -- measured: 30 paints, 1 request -- but not across turns:
+    ten paints in ten turns are ten requests, which is what scrolling past an
+    un-grabbable file looks like. This set is what stands between such a file
+    and two mpv subprocesses per turn for as long as its row is on screen.
 
     Which is why it must NOT be made to match _requested_sheets, whose
     _sheet_finished discards on completion. A sheet is asked for by hovering a
