@@ -4,11 +4,18 @@ cd /d "%~dp0"
 
 rem Usage:  build.bat            -> onedir  (default, faster startup)
 rem         build.bat onefile    -> single portable AXPlayer.exe
+rem
+rem Pinned to 3.14 on purpose. This used to say `py -3`, which resolves to
+rem whatever the py launcher's default happens to be -- 3.14 today, and every
+rem release so far was built with it. If that default ever moves, `py -3`
+rem would ship a different interpreter with no sign that anything changed:
+rem the same commit built on 3.10 produces a visibly smaller, different
+rem bundle. Failing loudly when 3.14 is absent is the point.
 set "AXPLAYER_ONEFILE="
 if /i "%~1"=="onefile" set "AXPLAYER_ONEFILE=1"
 
-py -3 -m pip install -r requirements.txt pyinstaller -q
-py -3 -m PyInstaller --noconfirm --clean AXPlayer.spec
+py -3.14 -m pip install -r requirements.txt pyinstaller -q
+py -3.14 -m PyInstaller --noconfirm --clean AXPlayer.spec
 if errorlevel 1 (
   python -m pip install -r requirements.txt pyinstaller -q
   python -m PyInstaller --noconfirm --clean AXPlayer.spec
