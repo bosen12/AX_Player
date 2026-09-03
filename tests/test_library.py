@@ -365,3 +365,40 @@ def test_removing_the_first_row_after_a_url_does_not_drop_the_stream(tmp_path):
     assert not any(a[0] == "playlist-remove" for a in widget._sent), (
         "removed an entry by an index that no longer means what it did"
     )
+
+
+# -- what mpv is actually told on a double click ---------------------------
+def test_double_clicking_the_video_sends_the_key_mpv_binds_fullscreen_to():
+    """Asked of a live mpv rather than assumed:
+
+        MBTN_LEFT      -> ignore
+        MBTN_LEFT_DBL  -> cycle fullscreen
+
+    Relaying a second MBTN_LEFT -- which is what this did -- lands on the
+    binding whose whole job is to do nothing, so double-clicking the video
+    never toggled fullscreen.
+    """
+    from PySide6.QtCore import Qt
+
+    from ax_player.player_widget import _MOUSE_BUTTONS, _MOUSE_BUTTONS_DBL
+
+    assert _MOUSE_BUTTONS_DBL[Qt.MouseButton.LeftButton] == "MBTN_LEFT_DBL"
+    assert _MOUSE_BUTTONS[Qt.MouseButton.LeftButton] == "MBTN_LEFT"
+
+
+def test_side_buttons_keep_the_plain_name_because_mpv_rejects_theirs():
+    """Measured against a live mpv: MBTN_MID_DBL and MBTN_RIGHT_DBL are
+    accepted, MBTN_BACK_DBL and MBTN_FORWARD_DBL are refused with "is not a
+    valid input name". Sending those would write an error line into debug.log
+    on every side-button double click, and debug.log noise is a problem this
+    project has already had to dig out of once."""
+    from PySide6.QtCore import Qt
+
+    from ax_player.player_widget import _MOUSE_BUTTONS_DBL
+
+    assert set(_MOUSE_BUTTONS_DBL) == {
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.MiddleButton,
+        Qt.MouseButton.RightButton,
+    }
+    assert Qt.MouseButton.BackButton not in _MOUSE_BUTTONS_DBL

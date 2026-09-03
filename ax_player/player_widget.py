@@ -38,6 +38,26 @@ _MOUSE_BUTTONS = {
     Qt.MouseButton.ForwardButton: "MBTN_FORWARD",
 }
 
+# A double click is its own key to mpv, and for the left button it is the only
+# one that does anything. Asked of a live mpv rather than assumed:
+#
+#     MBTN_LEFT      -> ignore
+#     MBTN_LEFT_DBL  -> cycle fullscreen
+#
+# So relaying a second MBTN_LEFT -- which is what this did -- lands on the
+# binding whose entire job is to do nothing, and double-clicking the video did
+# not toggle fullscreen at all.
+#
+# Only these three names exist. MBTN_BACK_DBL and MBTN_FORWARD_DBL are refused
+# with "is not a valid input name", which would put an error line in debug.log
+# on every double click of a side button, so those keep the plain name and
+# simply register as another click.
+_MOUSE_BUTTONS_DBL = {
+    Qt.MouseButton.LeftButton: "MBTN_LEFT_DBL",
+    Qt.MouseButton.MiddleButton: "MBTN_MID_DBL",
+    Qt.MouseButton.RightButton: "MBTN_RIGHT_DBL",
+}
+
 # Same WS_DISABLED story applies to the keyboard: mpv never sees a single
 # keypress unless we relay it. This is why user input.conf bindings (e.g. the
 # CTRL+1..9 Anime4K shortcuts, or F3 for the Fluid Motion IPC toggle) look
@@ -409,7 +429,11 @@ class PlayerWidget(QWidget):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        name = _MOUSE_BUTTONS.get(event.button())
+        # Qt delivers press, release, *doubleclick*, release -- the second
+        # click never arrives as a press -- so this is mpv's only chance to
+        # hear about it, and it has to be told the _DBL name to act on it.
+        button = event.button()
+        name = _MOUSE_BUTTONS_DBL.get(button) or _MOUSE_BUTTONS.get(button)
         if name is not None:
             self._send_pos(event)
             self._mpv_cmd("keypress", name)
