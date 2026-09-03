@@ -41,16 +41,29 @@ def test_prune_removes_an_abandoned_scratch_dir_but_not_a_live_one(tmp_path):
 
 
 def test_prune_evicts_by_size_and_leaves_the_cache_under_the_cap(tmp_path):
-    for i in range(10):
-        f = tmp_path / f"{i:02d}.jpg"
+    """Access order is deliberately the *reverse* of creation order.
+
+    The version this replaces created 00..09 in order and made 00 the oldest,
+    so directory order and access order agreed -- and deleting the
+    `entries.sort(key=atime)` line left it green, because eviction in scandir
+    order removed exactly the same five files. A statement-deletion sweep found
+    it: the only assertion that mattered could not fail.
+
+    Here the first file written is the most recently used, so evicting in the
+    order the directory hands them over keeps precisely the wrong half.
+    """
+    names = "abcdefghij"
+    for i, name in enumerate(names):
+        f = tmp_path / f"{name}.jpg"
         f.write_bytes(b"x" * 1000)
-        stamp = time.time() - (10 - i) * 60  # 00 oldest
+        stamp = time.time() - (i + 1) * 60  # 'a' newest, 'j' oldest
         os.utime(f, (stamp, stamp))
+
     cache.prune_cache(tmp_path, max_bytes=5000)
-    total = sum(p.stat().st_size for p in tmp_path.iterdir())
-    assert total <= 5000
-    assert not (tmp_path / "00.jpg").exists(), "kept the least recently used"
-    assert (tmp_path / "09.jpg").exists(), "evicted the most recently used"
+
+    left = sorted(p.stem for p in tmp_path.iterdir())
+    assert sum(p.stat().st_size for p in tmp_path.iterdir()) <= 5000
+    assert left == list("abcde"), f"evicted by directory order, not by access time: {left}"
 
 
 def test_sheets_from_a_retired_grid_size_are_dropped():
@@ -511,3 +524,53 @@ def test_no_mpv_yet_returns_nothing_instead_of_raising(tmp_path, monkeypatch):
         "a sheet was produced with no mpv to decode with"
     )
     assert spawned == [], f"tried to spawn {len(spawned)} process(es) with no mpv to spawn"
+
+
+def test_a_malformed_resume_entry_does_not_take_the_rest_of_the_list_with_it():
+    """resume.json is user-editable JSON on disk, and at least one real install
+    was found holding bare-number entries from some earlier write path.
+
+    Callers do entry.get(...) unconditionally while building the sidebar, so
+    one bad entry used to raise mid-loop and silently truncate every row after
+    it -- the folder just looked shorter than it was.
+
+    A statement-deletion sweep removed the guard and the suite stayed green.
+    """
+    from ax_player import resume
+    from ax_player.paths import resume_db_path
+
+    resume_db_path().write_text(
+        '{"C:/V/a.mkv": 42, "C:/V/b.mkv": {"pos": 5.0, "duration": 100.0, "watched": false},'
+        ' "C:/V/c.mkv": null, "C:/V/d.mkv": {"pos": 1.0}}',
+        encoding="utf-8",
+    )
+    resume._cache = None
+
+    assert resume.get_progress("C:/V/a.mkv") is None, "a bare number came back as an entry"
+    assert resume.get_progress("C:/V/c.mkv") is None
+    assert resume.get_progress("C:/V/d.mkv") is None, "an entry with no duration came back"
+    good = resume.get_progress("C:/V/b.mkv")
+    assert good is not None and good["duration"] == 100.0, "the valid entry was lost too"
+
+    # What the sidebar actually does with them.
+    rows = [
+        {"path": p, "progress": resume.get_progress(p)}
+        for p in ("C:/V/a.mkv", "C:/V/b.mkv", "C:/V/c.mkv", "C:/V/d.mkv")
+    ]
+    assert len(rows) == 4, "the list was truncated by a malformed entry"
+    assert [bool((r["progress"] or {}).get("duration")) for r in rows] == [False, True, False, False]
+
+
+def test_a_zero_duration_sample_is_dropped_rather_than_divided_by():
+    """mpv reports duration 0 for a stream it has not resolved yet, and the
+    5-second poll fires regardless. Without the guard this is a ZeroDivisionError
+    on a Qt timer callback, which takes the progress poll down for the rest of
+    the session -- and nothing else writes resume.json.
+    """
+    from ax_player import resume
+
+    resume.save_progress(r"C:\V\stream.mkv", 0.0, 0.0)
+    resume.save_progress(r"C:\V\stream.mkv", 12.0, 0.0)
+    resume.save_progress(r"C:\V\stream.mkv", -1.0, 100.0)
+
+    assert resume.get_progress(r"C:\V\stream.mkv") is None, "an unusable sample was stored"
