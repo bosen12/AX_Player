@@ -164,7 +164,7 @@
       <div class="numcard">
         <p class="numcard__v">0.48<span>s</span></p>
         <p class="numcard__k">產生一張側邊欄縮圖</p>
-        <p class="numcard__c">一幀、一個 mpv 行程。同時最多跑四個，因為 GPU 解碼工作階段是有限資源。</p>
+        <p class="numcard__c">一幀、一個 mpv 行程。同時跑幾個跟著核心數走（2 到 8），量過才定：12 張 1080p HEVC 在有影片播放的情況下，上限 8 是 1.43s、上限 4 是 2.12s，兩者都是零掉幀。</p>
       </div>
       <div class="numcard">
         <p class="numcard__v">0.14<span>s</span></p>
