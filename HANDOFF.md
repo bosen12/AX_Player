@@ -474,3 +474,49 @@ set same value again  media 1.500s / wall 1.535s  -> lost +0.035s
 已確認**沒有任何東西讀它**：`mpv_root_candidates()` 找的是 `C:\mpv`／ProgramFiles／`~/mpv`／AXPlayer runtime／scoop／chocolatey／PATH，不含 repo 內的 `mpv/`；`FluidMotion.spec` 的 `datas` 只有 `fluid_motion/ui` 和 `fluid_motion/resources`；測試也沒碰。GitHub 免費 LFS 是 1 GB 儲存／1 GB 頻寬每月，大約十次 clone 就滿。
 
 AX Player 的做法是對的（binary 不進版控，`setup_mpv.py` 現抓）。但把它從歷史移除要 rewrite history，會影響任何已經 clone 的人，而且已經 push 出去了——**這不是我該自己決定的，等你說。** 只加 `.gitignore` 沒有用，那只讓未來的 commit 乾淨，105 MB 的 LFS 物件還在。
+
+---
+
+## 9. 09-03 這一輪：AMD 後端，與一次全面的效能量測
+
+### 9.1 找到並修掉的（AMD 後端本身之外）
+
+AMD 支援的實作分成五層，細節在 `Fluid_Motion_Player/CLAUDE.md`。這裡只記那一輪順帶挖出的**狀態機缺陷**，因為它們與後端無關、只是被後端這個新變數照出來：
+
+| 問題 | 證據 |
+|---|---|
+| **IPC 讀取失敗被誤判成「濾鏡掉了」** | `vf_is_fluid(None)` 是 `False`，與「沒有濾鏡」無法區分。正在編譯 TensorRT engine 的 mpv 讀不到 `vf`，於是每個 `APPLY_RETRY_BACKOFF` 就被塞一次新濾鏡——最沒餘裕的時候。而且必定發生：全預設快照下 `target_multi` 對 `2x/3x/4x` 根本不看 fps，一律回 >1。改成 `snapshot_playback` 另外回報 `vf_ok` |
+| **後端改變時不會重新套用** | `_filter_key` 的 docstring 是「everything that changes the generated .vpy」，而 backend 不在裡面。實測重現：濾鏡已載入、只有解析結果變動時，tick 認為 key 沒變 → mpv 繼續跑舊後端，而面板顯示新的。從 UI 切換剛好會繞過它（`set_enabled` 先 `_invalidate`），所以手動測永遠是好的 |
+| **後端在單一操作內被解析多次** | `_apply_to` 先建 key、再等 apply 鎖（mpv 重建 pipeline 時是數秒）、然後才寫檔，兩端各解析一次。實測：key 記 `trt`、檔案寫 `ncnn`。等廠商集合回穩，key 又對上了 → **永久失同步**。現在整條路徑一個操作解析一次往下傳 |
+| **缺 Vulkan 時被判定就緒** | ncnn 的就緒檢查只驗 `vsncnn.dll`。Vulkan loader 來自顯示卡驅動、裝不了，缺了會在濾鏡建構後才失敗 |
+
+### 9.2 這一輪量到的數字（HANDOFF 先前沒有的）
+
+**沒有一項需要動。** 記在這裡是為了下次不用重量，也不要有人憑直覺再列一次。
+
+| 路徑 | 實測 | 節奏 | 判斷 |
+|---|---|---|---|
+| `ui.set_items(3000)` | 17.2 ms | 開資料夾一次 | 感覺不到。profile 顯示成本分散在 Qt 的 `addItem`/`setData`，沒有異常熱點 |
+| `_RowDelegate.paint()` | 0.037 ms/列 | 捲動每幀 | 8 列可見 → 一次完整重繪 0.30 ms；60fps 連續捲動 ≈ **單核 1.8%** |
+| `natural_key` ×3000 | 5.65 ms | 掃描一次 | 在背景執行緒，不擋 UI |
+| `_sort_playlist(3000)` | 9.05 ms | 掃描一次 | 同上 |
+| `resume.save_progress` | 1.125 ms（220 筆） | 播放中每 5 秒 | 13.5 ms/分。CPU 面不成立，§8.1 早已判定爭點是寫入放大而非 CPU |
+| `cache_key()` | — | 每張縮圖 | 只雜湊「路徑+大小+mtime」字串，**不讀檔案內容**。本來就便宜 |
+| FM `tick()` 穩態 | 0.688 ms | 0.3 秒 | **137.7 ms/分**。主導的三項（每 tick 3 次 `mkdir`、5 次 `stat`、1 次 `io.open`）§7 全部量過並撤回；該節自己接受的閒置成本是 410 ms/分 |
+
+**`_apply_filter` 的複驗。** 這一輪量到 4.98 ms/按鍵，比 §7 記的 3.05 ms 高。用同等條件（短檔名）重量是 **3.70 ms**——差異來自檔名長度與機器變異，不是回歸。結論不變。
+
+### 9.3 量過之後修的一項（理由不是速度）
+
+**`Sidebar.set_playing()` 從 0.48 ms 變成 4.05 ms**（3000 列），是 v1.3.0 無障礙那輪引入的：`refresh_accessible_text` 被放進「走訪每一列」的迴圈。
+
+按這裡的尺**它不該動**——只在換片時跑一次，不是輪詢。修的理由是那 2998 列重算出來的字串跟原本一模一樣,**那些工作不可能改變任何東西**。改成只重建狀態真的變動的兩列後是 0.92 ms；`setData` 仍無條件執行，重繪行為不變。
+
+回歸測試蓋的是這類優化最容易漏的那一半:**停止播放的那一列**。少了它，換掉的檔案會繼續對螢幕報讀器宣稱「播放中」。
+
+### 9.4 這一輪的方法論教訓
+
+1. **子代理會把這份文件的「已撤回／不值得動」清單當成新發現抄回來。** 實際發生過:一輪 12 項裡有 4 項是逐字抄自 §7，另有 2 項把 Fluid Motion 的符號（`snapshot_playback`、`est_matrix`）掛到 AX 名下。要求它們**先從程式碼形成結論、最後才讀 HANDOFF 做交叉比對**，並為每條標註 NEW / ALREADY-FIXED / ALREADY-DECIDED-AGAINST，能有效擋掉。
+2. **測試會偷偷依賴跑測試那台機器的硬體。** `diagnose()` 變成依後端分流之後，既有測試的結果開始取決於執行機器上有沒有 NVIDIA 卡；ncnn 的斷言則取決於有沒有裝顯示卡驅動（Vulkan）。兩者都改成由測試自己 pin。
+3. **斷言 UI 原始碼字串時要先剝掉註解。** 修正的註解引用了它取代的舊字串，於是測試比對到自己的註解而失敗——為錯誤的理由。
+4. **`[hidden]` 屬性在現代 Chromium 是 `!important` 的。** 我曾斷言 `.cache-panel { display: flex }` 會蓋掉它、讓隱藏失效，實機測試後**撤回**:作者的一般宣告蓋不過 UA 的 `!important`,只有作者自己加 `!important` 才行。
