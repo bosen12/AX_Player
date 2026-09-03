@@ -395,11 +395,11 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 3. **快取的 LRU 依賴 `st_atime`。** 曾懷疑 Windows 預設不更新 atime 會讓它退化成 FIFO —— 實測這台是 `DisableLastAccess = 2 (System Managed, ENABLED)`，atime 確實有更新（thumbnails 的 atime 與 mtime 相差兩天）。**不是問題。**
 4. **`.vpy` 用畫面尺寸猜色彩矩陣**（`est_matrix = 1 if is_hd else 5`），BT.2020 / HDR 片源開補幀會偏色。是真的，但要正確修得從 frame props 讀，而使用者不看 HDR。
 5. **把 IPC 改成 pipeline**（`snapshot_playback` 16 個 round-trip → 1 個，mpv 忙時約省 230ms/tick）。收益真實，但那是 133 個測試圍著的核心路徑，改動面大。先做上面第 3 項就好。
-6. **`fluid_motion` 的死碼**（`enumerate_windows_pipes` / `exit_duplicate` / `fps_fraction_label` / `project_root`）。其中 `debug_log_path()` 是**刻意**留的，`cf33d83` 的 commit message 有寫。
+6. **`fluid_motion` 的死碼**（`enumerate_windows_pipes` / `exit_duplicate` / `fps_fraction_label` / `project_root`）。其中 `debug_log_path()` 是**刻意**留的，`c51d0d3` 的 commit message 有寫。
 
 ### 還有兩個「知道就好」的環境事實
 
-1. **`player_widget.py` 設的 `input_ipc_server` 不會贏過 `mpvSockets.lua`。** 實測用 `mpv.MPV(input_ipc_server="axtest-con", config_dir=r"C:\mpv")` 起 host，真正建立的管道是 `%TEMP%\mpvSockets\<pid>` —— mpv 在 option 執行期被改時會**重新綁定**，所以後設的贏，`2f6f49c` 想達成的目標其實沒達成。不影響功能：Fluid Motion 的 `6faf4c3` 早就加了 mpvSockets fallback。註解已在 v1.1.5 更正。
+1. **`player_widget.py` 設的 `input_ipc_server` 不會贏過 `mpvSockets.lua`。** 實測用 `mpv.MPV(input_ipc_server="axtest-con", config_dir=r"C:\mpv")` 起 host，真正建立的管道是 `%TEMP%\mpvSockets\<pid>` —— mpv 在 option 執行期被改時會**重新綁定**，所以後設的贏，`2f6f49c` 想達成的目標其實沒達成。不影響功能：Fluid Motion 的 `98bfb8d` 早就加了 mpvSockets fallback。註解已在 v1.1.5 更正。
 2. **`C:\mpv\scripts\mpvSockets.lua` 每次啟動報錯一次**（`debug.log` 裡 104 筆，cp950 解出來是「命令語法不正確。」）。它跑 `cmd /c mkdir`，路徑組壞了。既然 AX Player 自己設 `input_ipc_server`、`zz-fluid-ipc.lua` 也設，它在這台機器上其實多餘 —— 移掉可同時解決搶綁定和日誌噪音。那是第三方腳本，不在任一 repo 內。
 
 ### 維護提醒
@@ -423,7 +423,7 @@ NVDEC 與 d3d11va 都不支援，會退回軟體解碼。**這不是問題**：�
 | FM | 版本號停在 1.0.0 | git tag 當時已到 v1.4.6，程式裡卻還寫 1.0.0。這一輪隨著發版改成 **1.4.7**。沒有任何 CI 會 bump 它，所以**下次發版要記得手動改** `fluid_motion/__init__.py` 和 `pyproject.toml`（或改成從 tag 推導）。影響只在文件與 wheel 層面，沒有程式讀 `__version__` |
 | AX | 根目錄兩個空目錄 `.exe/`、`hi/` | 誤打的指令留下的；git 看不到空目錄所以 status 一直是乾淨的。已刪 |
 
-發完 release 之後又補了一個 **FM 的測試修正**（`268427f`，只碰測試、產物沒變，所以 v1.4.7 維持原樣）：`test_build_bat_does_not_report_success_after_a_failed_build` 用的是 `Path("build.bat")` —— **cwd 相對路徑**，所以它讀到的是 pytest 啟動所在目錄的那個 `build.bat`。從隔壁 AX Player 目錄跑就會讀到那一份而 `ValueError`。崩潰還算好的結果：真正的問題是只要某個 `build.bat` 剛好照順序含有那四個字串，它就會綠燈，而 FM 自己的檔案從頭到尾沒被打開過 —— 一個能因為錯誤理由通過的測試比會壞掉的更糟。**這正是這一輪在 `open_folder` 修掉的同一類 bug，往上一層而已。** 兩套測試其餘的讀取都掃過了，全部已經正確錨定在 `Path(module.__file__)`／`resources_dir()`／`ui_dir()`／`roaming_dir()`／`tmp_path`，只有這一處是裸的。修法驗證用的是 mutation：把 `build.bat` 的 guard 拿掉，測試確實會失敗（代表它真的在讀那個檔），事後用 sha256 確認 `build.bat` 完全還原。
+發完 release 之後又補了一個 **FM 的測試修正**（`e394e0b`，只碰測試、產物沒變，所以 v1.4.7 維持原樣）：`test_build_bat_does_not_report_success_after_a_failed_build` 用的是 `Path("build.bat")` —— **cwd 相對路徑**，所以它讀到的是 pytest 啟動所在目錄的那個 `build.bat`。從隔壁 AX Player 目錄跑就會讀到那一份而 `ValueError`。崩潰還算好的結果：真正的問題是只要某個 `build.bat` 剛好照順序含有那四個字串，它就會綠燈，而 FM 自己的檔案從頭到尾沒被打開過 —— 一個能因為錯誤理由通過的測試比會壞掉的更糟。**這正是這一輪在 `open_folder` 修掉的同一類 bug，往上一層而已。** 兩套測試其餘的讀取都掃過了，全部已經正確錨定在 `Path(module.__file__)`／`resources_dir()`／`ui_dir()`／`roaming_dir()`／`tmp_path`，只有這一處是裸的。修法驗證用的是 mutation：把 `build.bat` 的 guard 拿掉，測試確實會失敗（代表它真的在讀那個檔），事後用 sha256 確認 `build.bat` 完全還原。
 
 另外補了兩處註解：`inject._vf_arg` 把「vf 參數永遠是 `~~/` 相對、而 `~~` 是**播放器自己的** config dir」這個對呼叫端的約束寫明（`apply()` 拿到的 root 必須是 `player_config_dir(ipc)`，否則 .vpy 寫在 A、vf 指向 B，mpv 只會說 could not init VS）；`ui._popup_pos` 的註解原本說 popup「roughly level with the row」，實際是寫死 `y=8`，改成說明為什麼固定錨點才是對的。
 
@@ -467,7 +467,7 @@ set same value again  media 1.500s / wall 1.535s  -> lost +0.035s
 3. **`bootstrap._download` 失敗時留下 `.part`。** AX Player 的 `mpv_fetch._download` 已經用 `finally` 清掉，FM 沒有。但那個檔從不被讀（判斷用的是 `dest` 不是 `tmp`），重試會覆蓋，而且 §7 已經確認 `downloads` 目錄在這台機器上根本不存在。
 4. **lua `write_hotkey` 與 watcher 讀取之間的 truncate race。** mpv 以 `"w"` 開檔（截斷）到寫入之間，watcher 若剛好讀到會拿到空字串、按鍵掉一次。窗口是微秒級，`HOTKEY_POLL` 是 50 ms。
 
-### 8.5 沒有動，因為那是你的決定
+### 8.5 沒有動，因為那是你的決定 —— **09-04 已處理,見 §9.6**
 
 **Fluid Motion 的 repo 裡 commit 了一份 126 MB 的 mpv。** `mpv/` 共 96 個檔案，`mpv/mpv.exe` 109 MB 走 Git LFS（`.git/lfs` 105 M），其餘約 16 MB 是一般 git 物件。
 
@@ -535,3 +535,33 @@ AMD 支援的實作分成五層，細節在 `Fluid_Motion_Player/CLAUDE.md`。�
 **合併的成本量過了。** 1000 筆時 `save_progress` 5.66 ms → 5 秒輪詢下 **67.9 ms/分**,落在撤回其他效能項的區間下緣。而且加的是**讀取**不是寫入,所以 §8.1「爭點是寫入放大而非 CPU」那個論證不受影響。
 
 **方法論**:含反斜線的測試字串一律用 `chr(92)` 組出來,不要寫字面值。查 UNC 路徑那條時,shell 吃掉了測試輸入的反斜線,讓一個正確的分類器看起來是壞的 —— §6 早就警告過這個環境會這樣。
+
+### 9.6 09-04:§8.5 的 126 MB LFS,處理完了
+
+擁有者拍板後執行。**時機是理由的一部分**:當時 0 star、0 fork、沒有人 clone 過,所以改寫歷史的實際代價是零。等有使用者之後再做,就是要所有人重新 clone。
+
+`git filter-repo --path mpv/ --invert-paths` 掃過全部 60 個 commit。**不是只在 tip 刪掉**——那樣每個 clone 還是會把 110 MB 的 LFS 物件拉下來。
+
+| | 之前 | 之後 |
+|---|---|---|
+| pack 大小 | 8.61 MiB | **259 KiB** |
+| LFS 物件 | 110 MB | **0** |
+| commit / 標籤 | 60 / 19 | 61 / 19(全數保留) |
+| **乾淨 clone** | ~119 MB | **993 KB / 2 秒,`.git/lfs` 根本不存在** |
+
+從 clone 出來的 repo 跑測試:**226 passed**。所以它不只是變小,是真的可用。
+
+**已驗證沒有被弄壞的:**
+
+- 全部 18 個 release 與其資產完好。標籤改寫移動了指向的 commit,但 GitHub 的 release 綁的是**標籤名稱**、資產另存 —— 這點事前只是推斷,事後查證過了。
+- 那 110 MB 仍在本地 `.git/lfs`,加上一份含全部 ref 的 bundle 備份。檔案本身沒有消失。
+
+**改寫的附帶成本,以及怎麼補的:** 這份文件引用了三個 FM 的 commit 雜湊,改寫後全部失效。`filter-repo` 會產生 `.git/filter-repo/commit-map`,照著更新即可 —— 而且每個新雜湊都回頭確認過指向**相同的 commit 主旨**,不是只看對應表就算數:
+
+    cf33d83 -> c51d0d3    debug_log_path() helper
+    6faf4c3 -> 98bfb8d    mpvSockets pipe detection
+    268427f -> e394e0b    build.bat test anchoring
+
+`filter-repo` 會自動修好被改寫 repo **自己** commit 訊息裡的雜湊引用,但跨 repo 的引用它碰不到。兩個專案互相引用時要記得這件事。
+
+**一件仍未確定的:** 強制推送移除的是 LFS 物件的**引用**,GitHub 端的儲存可能還留一段時間,要完全清除通常得開 support ticket。但計費看的是**傳輸**,而乾淨 clone 已證實不再拉取,所以實際的頻寬上限問題已經解決。
