@@ -784,3 +784,61 @@ with the signals object destroyed under a running job:
 1. `app.py` 其餘部分沒有找到缺陷。`open_folder` 的 `resolve()`、`play()` 的成員資格判斷、`_on_folder_scanned` 的過期掃描丟棄、`open_dropped` 的 `dnd.classify` 分流——每一條都有註解寫著它擋的是哪個曾經發生過的 bug,而且邏輯對得上。
 2. **`_current` 播網址時被 `Path()` 壓壞**——§7「這一輪查過、故意沒做的」第 1 條,修了反而會壞 `set_sort_mode`。不重列。
 3. **`nvidia-smi ~160ms` 這個註解的數字。** 我量到的是 47ms,差三倍。**沒有改它** ——我不知道原本那筆是在什麼條件下量的(播放中、RIFE 開著時 nvidia-smi 會爭用),而 §5.10 說推翻一個數字跟提出它一樣需要證據。兩個數字都留著:47ms 是閒置,原註解的 160ms 條件不明。反正結論不變,兩者都不該在 UI 執行緒上跑。
+
+### 9.12 09-04:`ui.py` 讀完零修改;FM 一個在啟動途中被吃掉的「顯示」
+
+**AX 這半:`ui.py`(1405 行,最後一個沒逐行讀過的大檔)整份讀完,沒有找到能站得住的缺陷。**
+
+它的效能數字 §9.2 / §9.3 已經量完並接受(`set_items(3000)` 17.2ms、`_RowDelegate.paint` 0.037ms/列、`_apply_filter` 3-5ms、`set_playing` 已從 4.05ms 改回 0.92ms),**不要再列一次**。
+
+**撤回一條假設:「暫停時診斷面板會變紅」。**
+
+`DiagnosticsPanel._verdict_for` 完全沒有測試,而它拿 `estimated-vf-fps / container-fps`,低於 0.95 就印 DANGER 紅字「輸出幀率偏低」。暫停是使用者最常做的事,所以問題是:暫停之後 mpv 的 `estimated-vf-fps` 會不會衰減。
+
+用 mpv 自己生一段 30fps 的 `testsrc` 片段,實跑:
+
+```
+playing        container=30.033371  estimated-vf-fps=30.030466  -> '正常播放 · 30.0 fps' ok=True
+paused +1.0s   container=30.033371  estimated-vf-fps=30.030138  -> '正常播放 · 30.0 fps' ok=True
+paused +2.0s   container=30.033371  estimated-vf-fps=30.030138  -> '正常播放 · 30.0 fps' ok=True
+paused +5.0s   container=30.033371  estimated-vf-fps=30.030138  -> '正常播放 · 30.0 fps' ok=True
+resumed        container=30.033371  estimated-vf-fps=30.010003  -> '正常播放 · 30.0 fps' ok=True
+```
+
+**mpv 暫停時保留最後一個值,八秒都沒動。假設不成立。**
+
+順帶記一件**已知的近似**,不是缺陷:`_verdict_for` 的 1.8× 門檻假設補幀目標是兩倍。3x/4x 設定下只跑到 2.2× 會被判成「補幀運作中」。註解自己寫著「Fluid Motion's multiplier isn't exposed here」——要真的修得跨 app 傳倍率,不是 `ui.py` 的範圍。
+
+---
+
+**FM 這半,找到一個。挑檔法還是「哪些模組完全沒有測試」:`fluid_motion/app.py`(169 行)和 `icon.py`(30 行)是僅存的兩個。**
+
+**第二份複本按下的「顯示」會在啟動途中被吃掉。**
+
+`single.handover_or_continue` 把 `"show"` 寫進 hotkey 檔就結束自己,由執行中那一份把視窗叫出來。但兩端接線的時間差很多:`start()` 就把 hotkey 執行緒放出去了(50ms 輪詢),而 `app.main()` 要等 `import webview`、`create_window` 和 `tray_ok.wait(timeout=1.5)` 之後才呼叫 `set_on_show`。
+
+`_consume_hotkey` 是**先 unlink 再 dispatch**,而 dispatch 寫成 `elif text == "show" and self._on_show:` —— 落在那段空窗的請求被讀走、刪掉、丟掉,**沒有任何東西會重試**。使用者點了圖示,視窗不會出現。
+
+量了那個空窗:
+
+```
+engine.start() 回來(hotkey 執行緒開始輪詢)   t=0
+engine.set_on_show() 被呼叫                    t=72 ms
+```
+
+**72ms 是下限,不是答案** —— 那次量測裡 `webview` 已經 import 過了(我為了 stub `webview.start` 先 import 了它),真實路徑還要付一次冷 import 和最多 1.5 秒的 tray 交握。這是這一輪的量測誤差,記下來免得有人引用 72ms 當成完整數字。
+
+修法:接不到手的請求記在 `_pending_show`,`set_on_show` 接線時補送一次。**重點在第二半:只補送真的來過的請求。** 無條件在接線時叫出視窗會在每次啟動都彈窗,而那正是 `--start-hidden` 要避免的事,也是 autostart 的跑法。
+
+新增 `tests/test_handover.py`。突變驗證(對照組 243 passed,3.10 與 3.14 都跑):
+
+| 突變 | 結果 |
+|---|---|
+| 還原成會丟掉的 guard | **CAUGHT** —— 補送、以及只補送一次兩個測試紅 |
+| 接線時無條件補送 | **CAUGHT** —— `--start-hidden` 那個測試紅 |
+
+**查過、沒有動的:**
+
+1. **`Engine._on_change` 是接不上的死線頭。** 每個 tick 後都會呼叫它(`if self._on_change:`),但 `start()` 唯一的呼叫端是 `app.py:31` 的 `engine.start()`,不帶參數,而且只有 `set_on_show` 沒有 `set_on_change`。UI 其實是每 900ms 輪詢 `get_state()`(`app.js:527`)。屬於 §7「查過、判斷不值得動」第 6 條的死碼類別,**照那條判斷不動**,列在這裡是因為它看起來像「UI 有推播」,會誤導讀的人。
+2. **`tray_ok` 的兩個窄縫。** `tray_ok.set()` 在 `icon.run()` 之前,所以中間失敗會有一瞬間是「已設定但沒有圖示」;而 Explorer 重啟殺掉 tray 圖示之後 `tray_ok` 仍是 set,關視窗就變成沒有圖示的隱形行程。兩個都窄且不好驗證,沒有動。
+3. **`single.try_acquire` 的 `ctypes` 用法是對的。** `restype = c_void_p`(避開 CLAUDE.md 那個 64-bit handle 截斷的陷阱)、`use_last_error` 加註解、`CloseHandle` 明確包 `c_void_p`、handle 存在模組全域所以不會被回收。`Local\` 命名空間對一個 per-user 托盤程式也是對的。
