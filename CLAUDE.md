@@ -118,6 +118,13 @@ push the tag, then `gh release create` with two assets: `AXPlayer-onedir.zip`
 and `AXPlayer.exe` (the onefile build). Release titles follow
 `AX Player vX.Y.Z`.
 
+One thing does carry a version by hand: the `ver-chip` span in
+`docs/index.html`, which is the offline fallback for the number `docs/app.js`
+normally fetches from the GitHub API. **Bump it when you tag** — it was two
+releases behind before anyone looked. No test pins it here, because there is no
+version constant to pin it *to*; Fluid Motion's equivalent is tied to
+`__version__` in `test_public_surfaces.py`.
+
 The distribution copy the owner keeps lives at `C:\AX_Player`
 (`onedir/`, `onefile/`, `release/`, plus `README.md`, `NOTICE.md`,
 `LICENSES/`, `版本說明.txt`).
