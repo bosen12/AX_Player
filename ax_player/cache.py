@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -43,6 +44,31 @@ def cache_key(video: Path) -> str:
 # one is at most GRAB_TIMEOUT (30s) old. An hour is a wide margin against
 # deleting work a second process is still doing.
 SCRATCH_MAX_AGE = 3600.0
+
+
+def clear_scratch(tmp_dir: Path) -> None:
+    """Empty one frame-grab scratch directory and remove it.
+
+    Lives here because both grabbers need it and both had their own copy of
+    the same flawed loop. Every entry is guarded on its own: a leftover
+    *directory* makes unlink raise PermissionError on Windows (measured:
+    WinError 5), and with a single try around the whole loop that one entry
+    aborted the sweep *and* skipped the rmdir below -- leaking the directory
+    and whatever else was in it until _drop_stale_scratch swept it an hour
+    later.
+    """
+    for leftover in tmp_dir.glob("*"):
+        try:
+            if leftover.is_dir():
+                shutil.rmtree(leftover, ignore_errors=True)
+            else:
+                leftover.unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        tmp_dir.rmdir()
+    except OSError:
+        pass
 
 
 def _drop_stale_scratch(entry: os.DirEntry) -> None:

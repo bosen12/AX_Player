@@ -4,7 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from ax_player.cache import cache_key, prune_cache
+from ax_player.cache import cache_key, clear_scratch, prune_cache
 from ax_player.paths import mpv_exe, thumbnail_cache_dir
 
 THUMB_WIDTH = 320
@@ -93,9 +93,4 @@ def _grab_frame(video: Path, seek: str, dest: Path, *, width: int) -> Path | Non
     except (subprocess.SubprocessError, OSError):
         return None
     finally:
-        try:
-            for leftover in tmp_dir.glob("*"):
-                leftover.unlink(missing_ok=True)
-            tmp_dir.rmdir()
-        except OSError:
-            pass
+        clear_scratch(tmp_dir)

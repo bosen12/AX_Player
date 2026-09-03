@@ -168,6 +168,40 @@ def test_an_unchanged_position_is_not_written_again(monkeypatch):
     assert resume.get_progress(r"C:\V\a.mkv")["pos"] == 125.0
 
 
+def test_a_leftover_directory_does_not_abort_the_scratch_sweep(tmp_path):
+    """Both frame grabbers had their own copy of a sweep that could not survive
+    one unexpected entry.
+
+    Measured on Windows: unlink() on a directory raises PermissionError
+    (WinError 5), and with a single try around the whole loop that one entry
+    aborted the sweep *and* skipped the rmdir -- so the scratch directory and
+    everything beside it leaked until _drop_stale_scratch reached it an hour
+    later. contact_sheets was fixed and thumbnails was not; the helper is
+    shared now so neither can drift again.
+    """
+    from ax_player.cache import clear_scratch
+
+    scratch = tmp_path / ".tmp-abc-1234"
+    scratch.mkdir()
+    # A leftover subdirectory, which is what a fallback grab can leave behind,
+    # sorted first so it is hit before the frames.
+    (scratch / "-fallback").mkdir()
+    (scratch / "-fallback" / "00.jpg").write_bytes(b"x")
+    (scratch / "frame.jpg").write_bytes(b"x")
+
+    clear_scratch(scratch)
+
+    assert not scratch.exists(), "the scratch directory leaked"
+
+
+def test_clearing_scratch_survives_an_already_gone_directory(tmp_path):
+    """It runs in a finally, so it has to be safe on every path out --
+    including one where the grab never created the directory at all."""
+    from ax_player.cache import clear_scratch
+
+    clear_scratch(tmp_path / "never-existed")  # must not raise
+
+
 def test_a_second_ax_player_does_not_erase_the_first_ones_progress():
     """Each process holds the whole database in memory and writes all of it
     back, so the last writer used to replace the others' entries wholesale.

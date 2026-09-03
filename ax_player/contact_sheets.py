@@ -21,7 +21,7 @@ from pathlib import Path
 
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 
-from ax_player.cache import cache_key, prune_cache
+from ax_player.cache import cache_key, clear_scratch, prune_cache
 from ax_player.paths import contact_sheet_cache_dir, mpv_exe
 
 GRID_COLS = 3
@@ -107,30 +107,6 @@ def probe_duration(video: Path) -> float | None:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
-def _clear_scratch(tmp_dir: Path) -> None:
-    """Empty a frame-grab scratch directory and remove it.
-
-    Every entry is guarded on its own. A leftover *directory* -- a fallback
-    grab's own scratch dir that outlived its rmdir -- makes unlink raise
-    PermissionError on Windows, and with one try around the whole loop that
-    single entry aborted the sweep *and* skipped the rmdir, leaking the
-    directory and every frame in it until cache's hourly scratch sweep got to
-    it an hour later.
-    """
-    for leftover in tmp_dir.glob("*"):
-        try:
-            if leftover.is_dir():
-                shutil.rmtree(leftover, ignore_errors=True)
-            else:
-                leftover.unlink(missing_ok=True)
-        except OSError:
-            pass
-    try:
-        tmp_dir.rmdir()
-    except OSError:
-        pass
-
-
 def _grab_frame_at(video: Path, seconds: float, dest: Path) -> Path | None:
     exe = mpv_exe()
     if exe is None:
@@ -172,7 +148,7 @@ def _grab_frame_at(video: Path, seconds: float, dest: Path) -> Path | None:
     except (subprocess.SubprocessError, OSError):
         return None
     finally:
-        _clear_scratch(tmp_dir)
+        clear_scratch(tmp_dir)
 
 
 def _settled_frames(
@@ -412,4 +388,4 @@ def generate_contact_sheet(video: Path, frame_count: int = FRAME_COUNT) -> Path 
                 pass
         return dest
     finally:
-        _clear_scratch(tmp_dir)
+        clear_scratch(tmp_dir)
