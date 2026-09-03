@@ -1036,3 +1036,51 @@ v1.3.3 以來累積的程式碼變更只有兩個:`a0c806e`(GPU 取樣的 emit �
 **又是 §5.2 那條:測量/驗證的工具本身會騙人。** 「檔案存在」從來不等於「這一次產生的檔案存在」,而建置產物的目錄本來就會留著上一次的東西。以後等建置就比時間戳,不要比存在。
 
 `C:\AX_Player` 的散布副本(`onedir/`、`onefile/`、`release/`)也一併更新,四個檔案逐一用 SHA256 對過。`release/FluidMotion.exe` 順手換成 v1.6.4。
+
+### 9.17 09-04:FM 的網頁 UI —— 全部的 Python 讀完了,JS 還沒
+
+前面幾輪把兩個 repo 的 **Python** 逐行讀完了,但 FM 的 `fluid_motion/ui/`(app.js 528 行)一直沒讀。而 CLAUDE.md 明說那裡是**安全邊界**,而且有真實的 XSS 前科(`media-title` 走 `innerHTML`)。
+
+#### app.js 讀完:沒有找到缺陷
+
+`innerHTML` 的 sink 只有三處 —— `renderPlayers`、`renderChecks`、`chipGroup`。把 36 個 `${...}` 插值洞全部列出來、逐一追回來源:
+
+- `renderPlayers`:`p.label`/`p.name`/`p.media`/`p.missing`/`p.config_dir` **全部包了 `escapeHtml`**。其餘是 `p.width`/`p.height`(int)與布林/三元。
+- `renderChecks`:`c.ok`、`c.label` 都escape 了。
+- `chipGroup`:資料是 `PROFILES`/`MODELS`/`BACKENDS`/`SCENE_PRESETS`,**全是 JS 字面值**。
+- **顯示卡名稱**(來自驅動程式登錄檔)走的是 `root.title = ...` 屬性指派,不是 `innerHTML` —— 原始碼註解已經寫明這是刻意的。
+- `outLabel`、`target`、快取大小、GPU 讀數,全部走 `textContent`。
+
+**邊界是守住的。**
+
+#### 但守衛本身有一個缺口,而且量得出來
+
+現有的守衛已經比它取代的「數 `innerHTML` 出現幾次」好很多 —— 它檢查每個插值洞裡有沒有 `escapeHtml`。**但欄位清單是手寫的十個名字**,而那是同一種過時、只是往上一層:**它對「有人記得的欄位」為真,對「實際存在的欄位」不是。**
+
+實測那個缺口:
+
+```
+把 ${p.exe} 原封不動塞進 renderPlayers 的 innerHTML 樣板
+-> 全套 243 個測試通過,包含兩個 XSS 守衛
+```
+
+`p.exe` 是 psutil 從行程讀出來的執行檔路徑,而 `PlayerProcess` 有 **13 個字串欄位,清單只列了 5 個**(漏掉 `exe`、`title`、`pipe`、`fps`、`estimated_vfps`、`output_fps`、`target_fps`、`realtime_label`)。
+
+改成從 `dataclasses.fields(PlayerProcess)` 取 `str` 型別的欄位。**只取 str** 是刻意的:int 和 bool 正是 `${p.width}`、`${p.connected ? ...}` 在插的東西,要求它們包 `escapeHtml` 只會變成雜訊而不是守衛。非 dataclass 來源的(`c.*`、`gpu.name`、`state.error`)維持手寫。
+
+**另外加了一個自我檢查**:推導出來的清單裡如果沒有 `p.media` / `p.exe` 就直接失敗。那正是被取代的計數式守衛的失敗方式——**守衛還在跑,但已經什麼都沒蓋到**。`from __future__ import annotations` 讓 `f.type` 是字串 `"str"`,哪天改成 `str | None` 或加了 `typing` 註記,這個推導就會靜靜地回傳空 tuple。
+
+**突變驗證(對照組 243 passed,3.10 與 3.14 都跑):**
+
+| 突變 | 結果 |
+|---|---|
+| `${p.exe}` 原樣 | **CAUGHT**(改之前是綠的) |
+| `${p.title}` 原樣 | **CAUGHT**(改之前是綠的) |
+| `${escapeHtml(p.pipe)}` | 仍然綠 —— 守衛不是一律禁止插新欄位 |
+| 推導改成永遠取不到欄位 | **CAUGHT**(自我檢查生效) |
+
+第三個突變是刻意加的:**一個會把正確寫法也擋下來的守衛,下一個人就會把它拿掉。**
+
+事後 sha256 確認 `app.js` 完全還原,commit 只動到測試檔。
+
+**方法論**:這是 §5 那組教訓的一個新變體。這個守衛前後三代,每一代都在修上一代「斷言了一個當時為真、但不會跟著程式碼走的東西」——先是數 sink 的個數,再是列欄位的名字。**能從程式碼推導出來的,就不要寫在測試裡。**
