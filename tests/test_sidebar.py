@@ -267,6 +267,26 @@ def test_a_row_announces_more_than_its_filename(sidebar):
     assert "播放中" not in plain and "已看" not in plain
 
 
+def test_the_row_that_stops_playing_stops_saying_so(sidebar):
+    """The half that an optimisation here can silently drop.
+
+    set_playing rebuilds the accessible text only for rows whose playing flag
+    actually moved -- doing all 3000 took it from 0.48ms to 4.05ms, spent
+    recomputing identical strings. Two rows change on every switch, not one,
+    and the one that stops is the easy one to forget: it would go on
+    announcing 播放中 for a file that is no longer playing.
+    """
+    sidebar.set_playing(PATHS[1])
+    assert "播放中" in _accessible(sidebar, PATHS[1])
+
+    sidebar.set_playing(PATHS[2])
+
+    assert "播放中" in _accessible(sidebar, PATHS[2]), "the new row does not announce itself"
+    assert "播放中" not in _accessible(sidebar, PATHS[1]), (
+        "the previous row still claims to be playing"
+    )
+
+
 def test_dimmed_text_stays_readable(sidebar):
     """FAINT is not just for small labels: _RowDelegate paints every watched
     episode's filename in it at 13px, so the rows a returning user scans most
