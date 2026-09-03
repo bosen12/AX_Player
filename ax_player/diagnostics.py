@@ -33,7 +33,24 @@ class GpuQueryJob(QRunnable):
 
     @Slot()
     def run(self) -> None:
-        self._signals.ready.emit(query_gpu())
+        # Through app._emit_safely, like every other job on _thumb_pool. This
+        # one emitted directly and was the only worker left unguarded when
+        # v1.1.7 fixed the rest: closing the window destroys GpuSignals under
+        # a job that is already on a thread -- closeEvent's pool clear() drops
+        # only what has not started -- and the emit then raises "Signal source
+        # has been deleted" out of run(), where nothing catches it. Measured
+        # side by side in that state: GpuQueryJob raised, _ThumbJob returned.
+        #
+        # The window is roughly 5% of the time the panel is open: nvidia-smi
+        # measures 47ms median here (7 samples, idle) against the 1s timer.
+        #
+        # Imported inside run() because app imports this module, so the
+        # dependency cannot go the other way at module level. Same reason
+        # app.py defers its own player_widget and mpv_fetch imports, and by
+        # the time a job runs the module is long since loaded.
+        from ax_player.app import _emit_safely
+
+        _emit_safely(self._signals.ready, query_gpu())
 
 
 def query_gpu() -> dict:
