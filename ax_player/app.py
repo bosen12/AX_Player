@@ -104,10 +104,17 @@ class _SheetSignals(QObject):
 class _SheetJob(QRunnable):
     """Grabs FRAME_COUNT frames and composes them -- several seconds of mpv
     subprocess work, so this shares _thumb_pool's cap rather than running
-    unbounded: it is exactly the same kind of GPU-decode-subprocess load as
-    a thumbnail grab, just repeated, and the concurrency limit exists
-    because too many of these at once is what produces "thumbfast: cannot
-    create mpv subprocess" (too many simultaneous GPU decode sessions).
+    unbounded: it is exactly the same kind of decode-subprocess load as a
+    thumbnail grab, just repeated.
+
+    The cap is not about "thumbfast: cannot create mpv subprocess", which
+    every comment here used to say it was. HANDOFF §1.1 settled that in
+    v1.1.5: the cause is the `env` argument handed to mpv's own subprocess
+    command, 100% failure with it and 0% without, and GPU-session saturation
+    was tested directly -- 30 mpvs grabbing at once, thumbfast-style launches
+    0/6 failed. The cap is here for the ordinary reason instead: opening a
+    folder queues one of these per file, and each is a real process doing a
+    real decode.
     """
 
     def __init__(self, video: Path, signals: _SheetSignals):
@@ -275,12 +282,19 @@ class AXPlayerWindow(QWidget):
         self._sort_mode = settings.sort_mode()
         # Bulk thumbnail work is capped and separate from everything else, so
         # a folder of thousands of files can't starve the UI thread pool.
-        # Each frame-grab is its own mpv.exe subprocess doing hardware decode
-        # -- GPU decode sessions are a hard-limited resource (and shared with
-        # both the main embedded mpv instance and thumbfast's own on-demand
-        # subprocess for hover previews), not just CPU cores, so this stays
-        # capped low rather than scaling up with core count: too many at once
-        # is exactly what produces "thumbfast: cannot create mpv subprocess".
+        # Each frame-grab is its own mpv.exe subprocess doing a real decode,
+        # competing with both the embedded mpv the user is watching and
+        # thumbfast's own on-demand subprocess for hover previews.
+        #
+        # It is *not* capped to avoid "thumbfast: cannot create mpv
+        # subprocess", which this comment claimed until now and HANDOFF §1.1
+        # disproved in v1.1.5 (the cause is the `env` argument; 30 concurrent
+        # grabs left thumbfast-style launches at 0/6 failures). Raising it was
+        # then measured on 16 synthetic 720p clips: cap 8 ran 26% faster than
+        # cap 4 with no failures -- but those clips decode in 170ms against
+        # the ~1.2s §7 measured for a real episode, and nothing in that
+        # benchmark was playing a video at the time, which is the case that
+        # actually matters. Left at 4 until it is measured against that.
         self._thumb_pool = QThreadPool(self)
         self._thumb_pool.setMaxThreadCount(min(max(os.cpu_count() or 4, 2), 4))
         self._requested_thumbs: set[str] = set()
@@ -624,9 +638,18 @@ class AXPlayerWindow(QWidget):
         screen.
 
         The cost of keeping failures in is a row that stays grey until the
-        folder is reopened (open_folder clears the set), which is worth paying:
-        a grab can fail transiently, because too many simultaneous GPU decode
-        sessions is exactly what produces "cannot create mpv subprocess".
+        folder is reopened (open_folder clears the set), which is worth paying
+        anyway: a grab can fail transiently -- a file still being copied in, a
+        network share that blinked, mpv hitting its 20s timeout -- and the
+        alternative is re-queueing two mpv subprocesses per repaint for as
+        long as that row is on screen.
+
+        Not, as this said until now, because "too many simultaneous GPU decode
+        sessions" produces "cannot create mpv subprocess". That explanation
+        was disproved in v1.1.5 (HANDOFF §1.1: the cause is the `env`
+        argument), and this docstring was written on 09-04 -- four days after
+        -- which is §5.6 happening again: the wrong explanation outliving the
+        observation and spreading into new comments.
         """
         key = str(video)
         if key in self._requested_thumbs:
