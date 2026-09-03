@@ -672,3 +672,12 @@ mpv v0.41.0-920-gdd5d17d32,input-ar-delay=200ms rate=40/s
 **所以「release delivered: False」這個輸出完全不能當證據** ——連對照組(按下去有沒有收到)都沒有成立,那一行只是在說「什麼都沒收到」。§5.2 的那句話又應驗一次:**測量工具本身會騙人**。懷疑是 `wVk` 帶 `wScan=0` 時 Qt 這條路徑收不到,但那也只是假設。
 
 **這個問題因此仍然是開的,不要引用上面那支探針。** 要真的量,得換成有效掃描碼的按鍵,而那就會在焦點萬一跑掉時打進使用者正在用的視窗——所以下一次做之前先想清楚怎麼隔離(獨立桌面 / `CreateDesktop`,或者乾脆接受用合成事件只驗 `focusOutEvent` 這一半)。
+
+**還有一條當場列出、當場查掉的:「工作管理員裡有兩個 `FluidMotion.exe`,`single.py` 是不是壞了」。** 沒有壞。單次 `Start-Process` 之後 `Win32_Process` 就是兩筆,而且 `ParentProcessId` 直接說明了關係:
+
+```
+ProcessId 14448  ParentProcessId 51008   <- 我的 shell
+ProcessId 33828  ParentProcessId 14448   <- 上面那個的子行程
+```
+
+**PyInstaller onefile 本來就是兩個行程**:bootloader 解壓到暫存目錄之後把真正的程式當子行程跑,自己留著等它結束。應用程式實例只有一個。列在這裡是因為它看起來剛好像單一實例守衛失效,而那要花時間才查得清楚。
