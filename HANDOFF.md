@@ -747,3 +747,40 @@ F3 binding owner = 'zz_fluid_ipc'
 **載入順序不等於寫入順序,只要有腳本會阻塞。** 「zz-」保證的是前者,而這段註解一直把它當成後者在推理。
 
 方法論:這是 §5.6 那條的又一個實例——**觀測是對的(pipe 確實是 mpvSockets 的),接在上面的解釋是錯的**,而錯的解釋被寫進了程式碼註解。分辨兩個機制只花了一次 `input-bindings` 查詢。
+
+### 9.11 09-04:`app.py` 逐行讀完,一個 v1.1.7 漏掉的 emit
+
+`app.py`(1082 行)整份讀完。**只找到一個缺陷,但它是一整類問題裡唯一漏網的那個。**
+
+**`GpuQueryJob` 是 `_thumb_pool` 上唯一沒走 `_emit_safely` 的 job。**
+
+§7 記著「關閉時 emit 到已銷毀的 signals」是真的、已修(debug.log 有 12 筆)。`_ThumbJob`、`_SheetJob`、`_ScanJob` 三個都改用 `_emit_safely` 了,`GpuQueryJob` 沒有——它在 `diagnostics.py`,不在 `app.py`,所以那一輪掃 `ax_player` 的時候沒被歸進同一類。
+
+找法不是猜的:把所有 `.emit(` 列出來,再扣掉走 `_emit_safely` 的和在 GUI 執行緒上的,剩下的**只有兩個**。`_MpvFetchWorker` 那個安全(signals 就是 QThread 自己,`loop.exec()` 等著它),另一個就是這條。
+
+同樣狀態下並排實測(用 `shiboken6.delete` 明確銷毀 C++ 端,不去賭真實關閉的時序):
+
+```
+with the signals object destroyed under a running job:
+  GpuQueryJob    RuntimeError out of run(): Signal source has been deleted
+  _ThumbJob      run() returned normally
+```
+
+**可達性也量了。** `closeEvent` 的 `pool.clear()` 只丟得掉還沒開始的 job——註解自己寫著這件事——所以真正的暴露是「正在跑」的那段。`nvidia-smi` 在這台機器上 **47ms 中位數(7 次取樣、閒置)**,對上 1 秒的計時器,約是面板開著時間的 **5%**。不高,但代價是一個沒有人接的例外,而且視窗版沒有 console。
+
+修法是一行,唯一要說明的是 import 位置:`app` 會 import `diagnostics`,所以相依不能反過來走模組層級,改成在 `run()` 裡 import——`app.py` 自己延後 import `player_widget` 和 `mpv_fetch` 是同一個理由。
+
+新增 `tests/test_diagnostics.py`,這個模組**原本完全沒有測試**。四個測試,兩個盯這件事的兩半:
+
+| 突變 | 結果 |
+|---|---|
+| 改回直接 `emit` | **CAUGHT** —— 關閉那個測試紅 |
+| 守衛改成完全不 emit | **CAUGHT** —— 送達那個測試紅 |
+
+第二個一樣是刻意加的:**守衛套錯地方會讓 GPU 那一列永遠空白,而那看起來就像一台沒有 nvidia-smi 的機器**,永遠不會有人回報。
+
+**查過、沒有動的:**
+
+1. `app.py` 其餘部分沒有找到缺陷。`open_folder` 的 `resolve()`、`play()` 的成員資格判斷、`_on_folder_scanned` 的過期掃描丟棄、`open_dropped` 的 `dnd.classify` 分流——每一條都有註解寫著它擋的是哪個曾經發生過的 bug,而且邏輯對得上。
+2. **`_current` 播網址時被 `Path()` 壓壞**——§7「這一輪查過、故意沒做的」第 1 條,修了反而會壞 `set_sort_mode`。不重列。
+3. **`nvidia-smi ~160ms` 這個註解的數字。** 我量到的是 47ms,差三倍。**沒有改它** ——我不知道原本那筆是在什麼條件下量的(播放中、RIFE 開著時 nvidia-smi 會爭用),而 §5.10 說推翻一個數字跟提出它一樣需要證據。兩個數字都留著:47ms 是閒置,原註解的 160ms 條件不明。反正結論不變,兩者都不該在 UI 執行緒上跑。
