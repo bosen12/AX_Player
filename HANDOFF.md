@@ -1084,3 +1084,59 @@ v1.3.3 以來累積的程式碼變更只有兩個:`a0c806e`(GPU 取樣的 emit �
 事後 sha256 確認 `app.js` 完全還原,commit 只動到測試檔。
 
 **方法論**:這是 §5 那組教訓的一個新變體。這個守衛前後三代,每一代都在修上一代「斷言了一個當時為真、但不會跟著程式碼走的東西」——先是數 sink 的個數,再是列欄位的名字。**能從程式碼推導出來的,就不要寫在測試裡。**
+
+### 9.18 09-04:vendored patch 終於有測試了;以及公開頁面上的兩件事
+
+這一輪查兩個一直沒碰過的表面:**vendored 的 `thumbfast.lua`**,和 **`docs/`(發佈出去的 GitHub Pages 站)**。
+
+#### 1. `thumbfast.lua` 的三處手改,現在釘住了
+
+CLAUDE.md 把它列為維護陷阱:「更新 thumbfast 要重新套用三處手改,而且 `mpv-runtime/scripts/` 和 `C:\mpv\scripts\` 兩份都要改」。先確認現況——**兩份位元組相同,八個 `-- AX Player patch:` 標記都在**,`subprocess()` 的四個呼叫點都沒有 `env`。不變式成立。
+
+**但沒有任何測試釘住它。** 從上游直接覆蓋一份回來,§1.1 花一整個版本才找到的 bug 就回來了,而測試全綠。那個 patch 自己的註解裡就有 A/B:
+
+```
+8x without env, back to back      ........   (. spawned, X refused)
+8x with env,    back to back      XXXXXXXX
+8x with env,    0.5s apart        ........
+```
+
+新增 `tests/test_vendored_scripts.py`,三條:`subprocess()` 主體不能有 `env`、三處 patch 標記都在、**讀到的必須是這個 repo 的那一份**。
+
+**第三條不是形式,而且它是這一輪最值得記的一條。** 這台機器上 `C:\mpv\scripts\thumbfast.lua` 與 repo 的那份**位元組相同**,所以讀錯檔案會讓前兩條照樣通過、什麼都沒證明——正是 v1.1.8 那個 `build.bat` 測試的失敗方式。錨點走 `bundled_mpv_root()`(`Path(paths.__file__)` 推出來的),不是 cwd,也**不是 `default_mpv_root()`**。
+
+| 突變 | 結果 |
+|---|---|
+| 把 `env` 加回 subprocess 命令 | **CAUGHT** |
+| 改掉一處 patch 標記 | **CAUGHT** |
+| 錨點硬寫成 `C:\mpv` | **CAUGHT**,而且兩條內容測試**仍然是綠的** |
+
+**一個失敗的突變也記下來。** 我第一次試的是「把錨點換成 `default_mpv_root()`」——結果三條全綠,我差點當成守衛無效。實際查了才發現:在原始碼 checkout 裡 `default_mpv_root()` 和 `bundled_mpv_root()` **是同一個路徑**(`C:\projects\AX_Player\mpv-runtime`),所以那根本不是一個突變,是個 no-op。§7 那條「突變測試自己也會騙人」的又一例:**突變沒改到東西,看起來就跟守衛失效一模一樣。**
+
+#### 2. 公開頁面第四處,§9.14 那個錯解釋
+
+`docs/index.html:167` 寫著:
+
+> 一幀、一個 mpv 行程。**同時最多跑四個,因為 GPU 解碼工作階段是有限資源。**
+
+**兩個錯**:前半在 §9.15 之後不再成立(現在是跟著核心數走的 2 到 8),後半正是 §1.1 推翻掉的那個解釋。§9.14 修了 `app.py` 的三處註解,**漏了公開頁面這第四處**——而這是使用者真的會讀到的那一個。已換成量過的數字。
+
+**§5.6 又一次:錯的解釋會擴散,而且擴散得比修正快。** 下次再修這類東西,搜尋範圍要含 `docs/` 和 `README.md`,不要只搜 `*.py`。
+
+#### 3. 沒有動,因為那是你的決定:公開頁面說 MIT,repo 是 GPLv2+
+
+查 `docs/` 的時候撞到的,和上面兩件事無關:
+
+| 來源 | 說什麼 |
+|---|---|
+| `LICENSE` | **GNU GPL v2** 全文 |
+| `README.md:7` | GPLv2+ 徽章 |
+| `README.md:79` | 「**GPLv2+** — see `LICENSE`」 |
+| `CLAUDE.md` | 「GPLv2+, because libmpv is loaded in-process」 |
+| **`docs/index.html` 第 7、60、235、238 行** | **「MIT 授權」** ×4 |
+
+第 60 行是首頁最顯眼的那行副標(「Windows 10/11 · MIT 授權」),第 7 行是 meta description(搜尋結果會顯示的那段)。所以**對外的頁面說原始碼是 MIT,而 repo 裡放的是 GPL v2 全文**。
+
+`README.md:214` 的「授權注意事項」看得出來為什麼會這樣:那一段是在**還沒決定**要用什麼授權釋出的時候寫的(「在決定要把 AX Player 用什麼授權釋出之前請先看過」),而 `LICENSE` 和徽章後來定案成 GPLv2+,頁面沒跟上。
+
+**CLAUDE.md 明說「don't change the license casually」,所以我沒有動它。** 這是 §8.5 那一類——擁有者拍板的事。要改的方向大概是把頁面四處改成 GPLv2+ 對齊 `LICENSE`,但那是授權聲明,不是我該自己決定的。
