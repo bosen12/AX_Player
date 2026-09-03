@@ -81,9 +81,13 @@ def set_watched(video: str, watched: bool) -> None:
     """
     with _lock:
         data = _load()
+        removed: frozenset[str] = frozenset()
         if not watched:
             if data.pop(video, None) is None:
                 return
+            # Named so _write's merge does not read it back off disk and put
+            # it straight back -- which is what it did, silently, until now.
+            removed = frozenset({video})
         else:
             previous = data.get(video)
             duration = (
@@ -93,11 +97,26 @@ def set_watched(video: str, watched: bool) -> None:
             if previous == entry:
                 return
             data[video] = entry
-        _write(data)
+        _write(data, removed)
 
 
-def _merge_from_disk(data: dict[str, dict]) -> dict[str, dict]:
+def _merge_from_disk(
+    data: dict[str, dict], removed: frozenset[str] = frozenset()
+) -> dict[str, dict]:
     """Fold in entries written by another AX Player since this one loaded.
+
+    `removed` is what this process just deleted on purpose. Without it the
+    merge resurrects them: set_watched(video, False) pops the entry and calls
+    _write, _write reads the file back -- where the entry still is, because the
+    swap has not happened yet -- and setdefault puts it straight back. Measured
+    on a fresh database: after 標記為未看 the entry was still on disk, still
+    saying watched=True, and so was the in-memory cache, because this function
+    mutates the very dict it was handed. The row cleared in the sidebar and came
+    back watched on the next launch, which is the only place it was visible.
+
+    A deletion therefore beats another process's entry for the same key, where
+    the note below settles for the opposite. That asymmetry is deliberate: the
+    deletion is something the user just asked for by name.
 
     Each process holds the whole database in memory and writes all of it back,
     so without this the last writer replaces the others' entries wholesale.
@@ -119,11 +138,13 @@ def _merge_from_disk(data: dict[str, dict]) -> dict[str, dict]:
     if not isinstance(on_disk, dict):
         return data
     for key, value in on_disk.items():
+        if key in removed:
+            continue
         data.setdefault(key, value)
     return data
 
 
-def _write(data: dict[str, dict]) -> None:
+def _write(data: dict[str, dict], removed: frozenset[str] = frozenset()) -> None:
     """Written via a temp file and swapped in with os.replace: this rewrites
     the whole database, and it runs on every 5-second progress poll, so an
     in-place write is a standing chance for a crash or power loss to leave a
@@ -139,7 +160,7 @@ def _write(data: dict[str, dict]) -> None:
     path = resume_db_path()
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(json.dumps(_merge_from_disk(data)), encoding="utf-8")
+        tmp.write_text(json.dumps(_merge_from_disk(data, removed)), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         try:

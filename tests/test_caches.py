@@ -327,3 +327,72 @@ def test_the_thumbnail_seek_is_a_fraction_of_the_file_not_a_fixed_time():
     assert "THUMB_SEEK" in order and order.index("THUMB_SEEK") < order.index('"00:00:00"'), (
         "the percentage has to be tried first; frame 0 is the fallback"
     )
+
+
+# -- three branches an operator sweep found nothing distinguishing -----------
+def test_a_frame_still_being_written_is_not_counted_as_settled(tmp_path):
+    """v1.1.4's fix, which had no regression test.
+
+    mpv creates the file the moment it starts writing it, so the newest frame
+    in the directory is usually half-written. Counting it produced a truncated
+    JPEG in the last cell, which loads as a null QImage and is silently
+    dropped -- and the eight-frame sheet is then cached under a name that
+    states nine, so nothing ever revisits it.
+
+    The rule is "same non-zero size as one poll ago". Both halves matter: a
+    file that grew between polls is still in flight, and a zero-byte file is
+    the same size as last time without being finished at all.
+    """
+    grown = tmp_path / "00000001.jpg"
+    steady = tmp_path / "00000002.jpg"
+    empty = tmp_path / "00000003.jpg"
+    grown.write_bytes(b"x" * 10)
+    steady.write_bytes(b"x" * 40)
+    empty.write_bytes(b"")
+
+    settled, sizes = contact_sheets._settled_frames(tmp_path, {})
+    assert settled == [], "nothing can be settled on the first pass -- there is no previous size"
+
+    grown.write_bytes(b"x" * 30)  # mpv is still writing this one
+    settled, _ = contact_sheets._settled_frames(tmp_path, sizes)
+
+    assert settled == [steady], f"settled the wrong set: {settled}"
+
+
+def test_unmarking_a_watched_episode_actually_removes_it(tmp_path):
+    """set_watched(video, False) deletes the entry rather than storing
+    watched=False -- "not watched" and "never opened" have to look identical in
+    the list, and a zeroed entry would keep the row's progress bar alive for a
+    video the user just said they had not seen.
+
+    The early return exists for the *absent* case. Inverted, it returns before
+    writing for the case that has something to delete, so unmarking looks like
+    it worked until the next launch reads the file back.
+    """
+    from ax_player import resume
+
+    video = r"C:\V\ep1.mkv"
+    resume.save_progress(video, 990.0, 1000.0)
+    assert resume.get_progress(video)["watched"] is True
+
+    resume.set_watched(video, False)
+    resume._cache = None  # force a re-read: the point is that it reached disk
+
+    assert resume.get_progress(video) is None, "the entry survived on disk"
+
+
+def test_an_unknown_sort_mode_never_reaches_the_settings_file():
+    """sort_mode() reads it back through the same allow-list, so a bad value
+    stored here is not visible until something else reads the file -- and the
+    inverted test stores the garbage while rejecting every valid mode, which
+    silently pins the list to 檔名 forever.
+    """
+    from ax_player import settings
+
+    settings.set_sort_mode(settings.SORT_SIZE)
+    assert settings.sort_mode() == settings.SORT_SIZE
+
+    settings.set_sort_mode("'; DROP TABLE --")
+    assert settings.sort_mode() == settings.SORT_NAME
+    stored = settings._s().value("library/sort")
+    assert stored in settings.SORT_MODES, f"garbage reached the file: {stored!r}"
