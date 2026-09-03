@@ -681,3 +681,69 @@ ProcessId 33828  ParentProcessId 14448   <- 上面那個的子行程
 ```
 
 **PyInstaller onefile 本來就是兩個行程**:bootloader 解壓到暫存目錄之後把真正的程式當子行程跑,自己留著等它結束。應用程式實例只有一個。列在這裡是因為它看起來剛好像單一實例守衛失效,而那要花時間才查得清楚。
+
+### 9.10 09-04:AX 兩個快取模組讀完零修改;FM 一個凍結的 lua,和一段量錯機制的註解
+
+**AX 這半:`cache.py`(128)+ `contact_sheets.py`(391)整份讀完,沒有找到缺陷。** 兩個檔的每一條防護都已經有註解說明它防的是什麼,而且**現場也對得上**——直接去看這台機器上真正的快取:
+
+```
+thumbnails      103 檔  1.1 MiB  0 個目錄   (上限 500 MiB)
+contact_sheets   93 檔  5.7 MiB  0 個目錄
+```
+
+沒有殘留的 `.tmp-*` / `.compose-*` 目錄、沒有 `.part-` 半成品、沒有舊格線的 `_12.jpg`。三種清理路徑都真的在跑。另外照 §5.4 確認過 `_PruneCacheJob` 真的會執行(`app.py:300`,建構時丟進 thumb pool),不是只寫在那裡。
+
+已知且**不重列**:`probe_duration` 沒有快取(§7「查過、判斷不值得動」第 1 條)。
+
+---
+
+**FM 這半,找到一個:播放器自己的設定目錄永遠拿不到更新後的 lua。**
+
+`_ensure_player_scripts` 一看到 `zz-fluid-ipc.lua` 存在就 return,docstring 也明說「Only ever adds a missing file」。但 `start()` 對 `settings.mpv_root` 是**每次啟動無條件重寫**。兩條路徑的政策相反,而腳本不是靜態的——`git log` 顯示 v1.0.0 到 v1.4.5 之間改過六次。
+
+實測重放(把 v1.0.0 的腳本放進一個設定目錄,呼叫真的 `_ensure_player_scripts`):
+
+| | 字元數 |
+|---|---|
+| v1.0.0 的腳本 | **192** |
+| 現在出貨的腳本 | **4742** |
+| 跑完之後磁碟上的 | **192**,原封不動,`needs_restart` 也沒設 |
+
+192 對 4742 不是微調,是幾乎整份。v1.0.0 那份沒有 seek hold-off、沒有 stale-filter 清理,也沒有 per-player 的 `seek_hold-<pid>` 檔(`d0b1e76`)——少了最後那個,**任何一台播放器 seek 都會把濾鏡從其他每一台上扯下來**。而面板照樣說那台播放器 ready。
+
+**唯一保持最新的目錄,正好是 AX Player 不會用的那個。** AX 的 config dir 是它自己的 `mpv-runtime`,不是 `C:\mpv`。
+
+改成缺檔**或內容過時**都安裝,兩種情況都設 `needs_restart`(mpv 只在啟動時載入腳本)。
+
+**比對必須比文字,不能比位元組。** `install_lua` 用 `write_text`,Windows 上把 `\n` 寫成 `\r\n`:磁碟上 4932 bytes,資源檔 4764 bytes,內容一模一樣。比位元組的話每次檢查都答「不同」→ 每個 session 重寫一次腳本,而且 `needs_restart` 永遠掛著,面板會一直要求使用者重啟一台腳本本來就正確的播放器。**這一半才是這個修法真正的風險,所以測試有一半在盯它。**
+
+**動到一個既有斷言,說明理由。** `test_an_existing_script_is_left_alone` 斷言的就是舊行為。它寫的內容是 `"-- someone else's"`,看起來像在保護使用者手改的腳本——但 `start()` 早就對 `mpv_root` 那份無條件覆寫了,所以「不覆蓋使用者的修改」這個政策本來就不成立,只是不一致。改寫成兩個測試(過時要換 / 已最新不能重寫)。
+
+**突變驗證(對照組 239 passed,3.10 與 3.14 都跑):**
+
+| 突變 | 結果 |
+|---|---|
+| 規則換回 `is_file()` | **CAUGHT** —— 過時的腳本沒被換 |
+| 比對換成 `read_bytes()` | **CAUGHT** —— 已最新的腳本被重寫 |
+
+事後 sha256 確認 `watcher.py` / `bootstrap.py` 完全還原。
+
+---
+
+**順帶:修掉 `mpv_detect._embedded_player_pids` 一段機制寫錯的註解。**
+
+它說「mpv 的 IPC listener 只綁一次,所以 zz-fluid-ipc.lua 後面的 rebind 是 no-op」。但 §7「知道就好」第 1 條和 `player_widget.py` 的註解都記著相反的機制(**mpv 會 rebind,後寫的贏**)。**同一件事在兩個 repo 有兩套互相矛盾的解釋**,而兩邊又都預測同一個結果,所以誰都沒發現。
+
+實跑真的 `C:\mpv` 設定:
+
+```
+input-ipc-server = '%TEMP%/mpvSockets/11464'
+F3 binding owner = 'zz_fluid_ipc'
+新出現的管道     = ['%TEMP%\mpvSockets\11464']   (沒有 fluid-mpv-*)
+```
+
+**關鍵是 F3 的 owner。** 它證明 zz-fluid-ipc.lua 確實載入、也確實跑了 `set_property`,而活下來的值仍然是 mpvSockets 的 —— 所以絕不是「只綁一次、先寫的贏」。**後寫的贏,而 mpvSockets 是後寫的那個**:它在 `set_property` 前一行跑 `utils.subprocess({args={"cmd","/c","mkdir",...}})`,那會讓出 mpv 的事件迴圈,於是其他腳本(包括 `zz-`)全部在它等待期間載入並寫入,然後它才回來覆蓋。
+
+**載入順序不等於寫入順序,只要有腳本會阻塞。** 「zz-」保證的是前者,而這段註解一直把它當成後者在推理。
+
+方法論:這是 §5.6 那條的又一個實例——**觀測是對的(pipe 確實是 mpvSockets 的),接在上面的解釋是錯的**,而錯的解釋被寫進了程式碼註解。分辨兩個機制只花了一次 `input-bindings` 查詢。
