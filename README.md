@@ -1,5 +1,108 @@
 # AX Player
 
+[English](#english) · [中文](#中文)
+
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Windows](https://img.shields.io/badge/platform-Windows-lightgrey)
+![License](https://img.shields.io/badge/license-GPLv2%2B-green)
+
+---
+
+## English
+
+A Windows desktop video player that **embeds real mpv** rather than wrapping it.
+The shell — a frameless title bar and a folder-based library sidebar — is native
+PySide6 Qt. Everything about *playback* is mpv's own: the seek bar, hover
+thumbnail previews, keybindings, fullscreen, subtitle and audio track menus, all
+drawn onto the video surface by [uosc](https://github.com/tomasklaen/uosc) and
+[thumbfast](https://github.com/po5/thumbfast).
+
+That split is the whole idea. mpv already does playback better than a
+reimplementation would, so this project adds only the two things mpv has no
+opinion about: **a window shell, and a library for folders of episodes.**
+
+### What it gives you that mpv alone does not
+
+- **A folder library with thumbnails.** Point it at a directory, optionally
+  recursive. Filenames sort **naturally** — episode 2 before episode 10, which
+  lexicographic order gets wrong every time.
+- **Watch progress at a glance.** A progress bar and a finished tick per row.
+  (The actual resume is mpv's own watch-later; this visualises it.)
+- **Opens on the first episode you have not finished**, rather than always the
+  first file.
+- **Search, multi-select, remove.** Removing takes a file out of the playlist,
+  never off the disk — and there is no "delete from disk" in the row menu, by
+  design.
+- **Drag and drop** a file or a whole folder onto the window.
+- **Play from a URL.** `setup_mpv.py` fetches `yt-dlp.exe` alongside mpv, so
+  mpv's own `ytdl_hook` resolves YouTube/Twitch links.
+- **Always on top**, and a one-click
+  [Fluid Motion](https://github.com/bosen12/Fluid_Motion_Player) toggle whose
+  icon reflects whether mpv currently has the interpolation filter loaded.
+
+### Requirements
+
+- Windows 10 (1803+) or 11 — the bundled `tar.exe` is used to unpack mpv's
+  official 7z release
+- Python 3.10, reachable as `py -3.10`
+- A GPU with hardware decoding (optional, but the difference is large)
+
+### Quick start
+
+```bash
+git clone https://github.com/bosen12/AX_Player.git
+cd AX_Player
+run.bat
+```
+
+`run.bat` installs dependencies, fetches mpv if neither `mpv-runtime\` nor
+`C:\mpv` has a usable `libmpv-2.dll`, and launches. The first run downloads
+about 79 MB if mpv is needed; after that it never does again. You can also pass
+a file or folder: `run.bat "D:\Videos\Some Series"`.
+
+### Where mpv comes from
+
+Looked for in this order (`default_mpv_root()` in
+[`ax_player/paths.py`](ax_player/paths.py)):
+
+1. **`mpv-runtime/`** — the project's own trimmed copy. `mpv.exe` and
+   `libmpv-2.dll` are fetched by `setup_mpv.py` from the official
+   [mpv-player-windows](https://sourceforge.net/projects/mpv-player-windows/)
+   builds and are **not** committed here; uosc, thumbfast, fonts and the config
+   are.
+2. **`C:\mpv`** — if you already keep a full mpv setup, it wins, and
+   `mpv-runtime/` is left untouched.
+3. **`%ProgramFiles%\mpv`**
+
+### License
+
+**GPLv2+** — see [`LICENSE`](LICENSE).
+
+Not a casual choice: AX Player loads `libmpv-2.dll` **into its own process**
+rather than shelling out to `mpv.exe`, and under the GPL that generally counts
+as linking. Unlike the LGPL, the GPL carves out no exception for dynamically
+linking non-GPL code. The reasoning, and the alternatives that were considered,
+are in [`mpv-runtime/NOTICE.md`](mpv-runtime/NOTICE.md) — worth reading before
+reusing any of this.
+
+Note that the packaged build ships **no mpv binaries**; they are fetched at
+first run into the user's own directory, so nothing here redistributes a GPL
+binary.
+
+### Contributing
+
+Read [`CLAUDE.md`](CLAUDE.md) first — it is the orientation document, and
+[`HANDOFF.md`](HANDOFF.md) is an engineering journal recording what has already
+been investigated, measured and *rejected*, with the evidence. Tests:
+`py -3.10 -m pytest tests -q`.
+
+The full documentation below is in Traditional Chinese and covers keybindings,
+packaging, project layout and troubleshooting in more depth.
+
+---
+
+## 中文
+
 一個把 [mpv](https://mpv.io/) 直接嵌入視窗的桌面播放器。介面（無邊框標題列、側邊欄片庫）用 PySide6 原生 Qt widgets 畫，但播放本身——進度條、縮圖預覽、快捷鍵、全螢幕、字幕/音軌切換——完全交給嵌入的 mpv 自己處理，透過 [uosc](https://github.com/tomasklaen/uosc) 和 [thumbfast](https://github.com/po5/thumbfast) 這兩個 mpv 腳本畫在畫面上。這個專案刻意不重新實作 mpv 已經做得很好的東西，只補上「資料夾片庫」跟「視窗殼」這兩塊 mpv 本身沒有的功能。
 
 ## 特色
