@@ -607,6 +607,23 @@ class AXPlayerWindow(QWidget):
             )
 
     def request_thumbnail(self, video: Path) -> None:
+        """One grab per file per open folder, successful or not.
+
+        Deliberately *not* the same rule as _requested_sheets, which
+        _sheet_finished discards on completion so a sheet can be asked for
+        again. The two look like they should match and must not: a sheet is
+        requested by hovering a row -- a deliberate act, already debounced --
+        while a thumbnail is requested from _RowDelegate.paint, which runs on
+        every repaint. Measured: 30 repaints of a row with no thumbnail make
+        30 calls here, so this set is the only thing between an un-grabbable
+        file and two mpv subprocesses per repaint for as long as it is on
+        screen.
+
+        The cost of keeping failures in is a row that stays grey until the
+        folder is reopened (open_folder clears the set), which is worth paying:
+        a grab can fail transiently, because too many simultaneous GPU decode
+        sessions is exactly what produces "cannot create mpv subprocess".
+        """
         key = str(video)
         if key in self._requested_thumbs:
             return

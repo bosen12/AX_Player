@@ -461,3 +461,46 @@ def test_with_no_folder_open_it_only_remembers_the_setting(monkeypatch):
 
     assert saved == [True]
     assert calls == [], "there is no folder to re-list"
+
+
+# -- the two request sets are not the same rule, on purpose ----------------
+def test_a_thumbnail_is_grabbed_once_per_file_however_often_the_row_repaints():
+    """_RowDelegate.paint asks for a thumbnail every time it paints a row
+    without one -- measured at 30 requests for 30 repaints. This set is the
+    only thing between an un-grabbable file and two mpv subprocesses per
+    repaint for as long as it is on screen.
+
+    Which is why it must NOT be made to match _requested_sheets, whose
+    _sheet_finished discards on completion. A sheet is asked for by hovering a
+    row: a deliberate, debounced act. Making these agree looks like tidying up
+    and is a respawn loop.
+    """
+    started = []
+    w = types.SimpleNamespace(
+        _requested_thumbs=set(),
+        _thumb_pool=types.SimpleNamespace(start=lambda _job: started.append(1)),
+        _jobs=object(),
+        sidebar=types.SimpleNamespace(set_thumbnail=lambda _p, _px: None),
+    )
+    video = Path(r"C:\V\broken.mkv")
+
+    AXPlayerWindow.request_thumbnail(w, video)
+    AXPlayerWindow._on_thumb_done(w, str(video), "")  # the grab failed
+    for _ in range(20):
+        AXPlayerWindow.request_thumbnail(w, video)
+
+    assert len(started) == 1, f"a failing file span up {len(started)} grabs"
+
+
+def test_reopening_the_folder_is_what_gives_a_failed_row_another_chance(monkeypatch, tmp_path):
+    """The cost of the rule above is a row that stays grey. open_folder
+    clearing the set is what bounds that to the current listing rather than
+    the whole session."""
+    w = _OpenWindow()
+    w._requested_thumbs = {r"C:\V\broken.mkv"}
+    (tmp_path / "vids").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    AXPlayerWindow.open_folder(w, Path("vids"))
+
+    assert w._requested_thumbs == set()
