@@ -1125,17 +1125,31 @@ class Sidebar(QWidget):
             return self._list.currentItem()
         return item
 
+    def claim_selection_for_menu(self, item: QListWidgetItem) -> None:
+        """Right-clicking a row outside the current selection acts on that row.
+
+        That is how every file manager behaves, and without it the menu applies
+        to whatever happened to be selected elsewhere in the list -- silently,
+        because the menu says nothing about what it is about to act on.
+
+        Split out of _show_row_menu for the same reason _menu_target and
+        build_row_menu were: everything left in that method ends at
+        QMenu.exec, which cannot be stubbed from Python, so a test that reaches
+        it parks on a real modal menu. Testing this in place meant copying the
+        four lines into the test and asserting over the copy, which is the
+        tautology CLAUDE.md's contact-sheet example warns about.
+        """
+        if item.isSelected():
+            return
+        self._list.clearSelection()
+        item.setSelected(True)
+        self._list.setCurrentItem(item)
+
     def _show_row_menu(self, pos) -> None:
         item = self._menu_target(pos)
         if item is None:
             return
-        # Right-clicking a row outside the current selection acts on that row,
-        # the way every file manager behaves -- otherwise the menu would
-        # silently apply to whatever happened to be selected elsewhere.
-        if not item.isSelected():
-            self._list.clearSelection()
-            item.setSelected(True)
-            self._list.setCurrentItem(item)
+        self.claim_selection_for_menu(item)
         paths = self._selected_paths()
         if not paths:
             return

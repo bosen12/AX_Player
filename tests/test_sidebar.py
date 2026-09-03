@@ -324,3 +324,61 @@ def test_right_clicking_blank_space_still_opens_nothing(sidebar, monkeypatch):
     sidebar._list.setCurrentRow(2)
 
     assert sidebar._menu_target(QPoint(10_000, 10_000)) is None
+
+
+# -- 只看未看完, and the menu's selection rewrite -------------------------
+def test_the_unwatched_only_filter_actually_hides_watched_rows(sidebar):
+    """A statement-deletion sweep could remove the whole `unwatched_only`
+    branch of _apply_filter and the suite stayed green -- the checkbox is a
+    listed feature and nothing exercised it.
+
+    The existing filter cover is all about the search box; the two are separate
+    conditions in the same loop and only one of them was tested.
+    """
+    watched = PATHS[1]
+    sidebar._rows[watched].setData(ui.WATCHED_ROLE, True)
+
+    sidebar._unwatched.setChecked(True)
+
+    hidden = {p for p in PATHS if sidebar._rows[p].isHidden()}
+    assert hidden == {watched}, f"hid {hidden}, expected only the watched row"
+
+    sidebar._unwatched.setChecked(False)
+    assert not any(sidebar._rows[p].isHidden() for p in PATHS), "unticking left rows hidden"
+
+
+def test_marking_watched_while_filtering_takes_the_row_off_the_list(sidebar):
+    """set_watched ends in _apply_filter for this reason: with 只看未看完 on,
+    ticking a row off has to remove it from the list, not leave it sitting
+    there contradicting the filter.
+
+    Deleting that one call left the suite green.
+    """
+    sidebar._unwatched.setChecked(True)
+    assert not sidebar._rows[PATHS[0]].isHidden()
+
+    sidebar.set_watched([PATHS[0]], True)
+
+    assert sidebar._rows[PATHS[0]].isHidden(), "a row stayed on a list that excludes it"
+    assert sidebar._rows[PATHS[0]].data(ui.PROGRESS_ROLE) == 0.0, (
+        "a finished episode kept its resume bar"
+    )
+
+
+def test_right_clicking_an_unselected_row_acts_on_that_row(sidebar):
+    """Every file manager behaves this way, and without it the menu silently
+    applies to whatever happened to be selected somewhere else in the list.
+
+    _menu_target only answers *which* row; the selection rewrite that follows
+    it is what the menu's own actions read back through _selected_paths.
+    """
+    sidebar._rows[PATHS[0]].setSelected(True)
+    sidebar._rows[PATHS[1]].setSelected(True)
+    target = sidebar._rows[PATHS[2]]
+    assert not target.isSelected()
+
+    sidebar.claim_selection_for_menu(target)
+
+    assert sidebar._selected_paths() == [PATHS[2]], (
+        "the menu would have acted on the old selection"
+    )
