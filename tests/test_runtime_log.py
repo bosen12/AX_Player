@@ -1,0 +1,77 @@
+"""The one line a bug report has to lean on.
+
+A windowed build has no console, so `mpv runtime: ...` in debug.log is the only
+record of which mpv root won and what it could do. It already covered the
+libmpv/VapourSynth/lua split; yt-dlp was missing, and yt-dlp is the capability
+that goes absent on an otherwise working install:
+mpv_fetch.ensure_runtime() fetches mpv.exe, libmpv-2.dll and yt-dlp.exe
+together, but returns before any of it the moment a candidate root already has
+libmpv-2.dll -- so a personal C:\\mpv is never topped up.
+"""
+from pathlib import Path
+
+import ax_player
+from ax_player import app as app_mod
+from ax_player import debug_log
+
+
+def _log_once(monkeypatch, root: Path) -> str:
+    lines: list[str] = []
+    monkeypatch.setattr(debug_log, "log", lines.append)
+    monkeypatch.setattr("ax_player.paths.default_mpv_root", lambda: root)
+    app_mod._log_mpv_runtime()
+    assert len(lines) == 1, "one line per launch, so a log opened later still says which build"
+    return lines[0]
+
+
+def test_a_root_without_yt_dlp_says_so(monkeypatch, tmp_path):
+    """The failing install: libmpv is there, so ensure_runtime() never runs and
+    never fetches yt-dlp.exe. ytdlp_exe() is then None, script_opts drops
+    ytdl_hook-ytdl_path, and 開啟網址 silently handles only direct media links.
+
+    Without this field the log says the runtime is fine, because by every other
+    measure it is.
+    """
+    (tmp_path / "libmpv-2.dll").write_bytes(b"x")
+    (tmp_path / "mpv.exe").write_bytes(b"x")
+
+    line = _log_once(monkeypatch, tmp_path)
+
+    assert "ytdlp=False" in line, f"yt-dlp is not reported at all: {line}"
+    assert "libmpv=True" in line and "mpv_exe=True" in line, (
+        "the rest of the line has to keep saying the install is otherwise fine "
+        "-- that contrast is the whole diagnostic"
+    )
+
+
+def test_a_complete_runtime_reports_every_capability(monkeypatch, tmp_path):
+    """The other half: a field that is always False is not a diagnostic."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("libmpv-2.dll", "mpv.exe", "yt-dlp.exe", "vapoursynth.dll"):
+        (tmp_path / name).write_bytes(b"x")
+    for name in ("zz-fluid-ipc.lua", "mpvSockets.lua"):
+        (scripts / name).write_bytes(b"x")
+
+    line = _log_once(monkeypatch, tmp_path)
+
+    for field in ("libmpv", "mpv_exe", "ytdlp", "vapoursynth", "fluid_ipc_lua", "mpv_sockets_lua"):
+        assert f"{field}=True" in line, f"{field} missing from: {line}"
+    assert str(tmp_path) in line, "the line has to name the root that won"
+
+
+def test_the_fetcher_and_the_log_agree_on_which_binaries_matter():
+    """Derived rather than written out: the log's capability fields for the
+    fetched binaries have to be the binaries mpv_fetch actually fetches. A
+    fourth download added there without a field here would go unreported in
+    exactly the situation this log exists for.
+    """
+    src = Path(ax_player.__file__).resolve().parent
+    fetch = (src / "mpv_fetch.py").read_text(encoding="utf-8")
+    logged = (src / "app.py").read_text(encoding="utf-8")
+
+    for binary in ("mpv.exe", "libmpv-2.dll", "yt-dlp.exe"):
+        assert binary in fetch, f"{binary} is no longer fetched -- update this test"
+        assert f"'{binary}'" in logged or f'"{binary}"' in logged, (
+            f"mpv_fetch downloads {binary} but the runtime log never reports it"
+        )

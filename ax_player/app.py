@@ -1021,6 +1021,19 @@ def _log_mpv_runtime() -> None:
     candidate list is enough -- with no visible symptom beyond interpolation
     quietly never working again.
 
+    yt-dlp is in the list for the same reason, and it is the one capability
+    that goes missing on a *working* install. mpv_fetch.ensure_runtime()
+    downloads mpv.exe, libmpv-2.dll and yt-dlp.exe together -- but it returns
+    early the moment any candidate root already has libmpv-2.dll, so a machine
+    with a personal C:\\mpv never runs it at all. If that install has no
+    yt-dlp.exe of its own, ytdlp_exe() is None, script_opts drops
+    ytdl_hook-ytdl_path, and mpv falls back to a bare "yt-dlp" on PATH that is
+    usually not there: 開啟網址 then works for direct media links and silently
+    fails for everything that needs extraction. That is the shape of the
+    URL-playback reports play_url's own logging was added for -- and it cannot
+    reproduce from a source checkout, where mpv-runtime/ always has the binary
+    because setup_mpv.py fetched it.
+
     Same reasoning as play_url's logging in player_widget: a windowed build
     has no console, so anything not written here has to be guessed at.
     """
@@ -1032,6 +1045,7 @@ def _log_mpv_runtime() -> None:
         f"mpv runtime: root={root} "
         f"libmpv={(root / 'libmpv-2.dll').is_file()} "
         f"mpv_exe={(root / 'mpv.exe').is_file()} "
+        f"ytdlp={(root / 'yt-dlp.exe').is_file()} "
         f"vapoursynth={(root / 'vapoursynth.dll').is_file()} "
         f"fluid_ipc_lua={(scripts / 'zz-fluid-ipc.lua').is_file()} "
         f"mpv_sockets_lua={(scripts / 'mpvSockets.lua').is_file()}"
