@@ -1310,3 +1310,47 @@ after a fresh load       : watched
 **這是這個 loop 第三次撞到「突變沒改到東西,看起來就跟守衛失效一模一樣」**(§9.18 錨點、§9.21 hex 字串)。改成會先斷言「替換真的改到東西」再跑的腳本之後,兩個都是 CAUGHT。
 
 **寫進方法論:突變測試的第一個斷言不是「測試紅了嗎」,是「我真的改到東西了嗎」。**
+
+### 9.23 09-04:把 §9.22 留在 `contact_sheets.py` 的那一叢清掉
+
+§9.22 的掃描在 `contact_sheets.py` 留下 18 個活著的突變,其中一整叢指向同一塊:**`--sstep` 抓不齊時的逐幀 fallback**。§7 說那是「the honest retry」,而它一行測試都沒有。
+
+三個測試,對應三件事:
+
+1. **快路徑短少就要走 fallback,而且會把每一幀都重抓一次。** `--sstep` 在 `GRAB_TIMEOUT` 時回傳已經寫完的部分,而 sheet 會用寫著九格的檔名快取起來、永不重看——所以接受八格等於**永久**快取八格。
+2. **抓不到的那一幀不能讓後面每一格的時間標籤位移。** fallback 是把每一幀跟它自己的秒數配對,不是跟 `times` 依位置 zip;抓不到的那格直接不在清單裡,位置 i 就不再等於 `times[i]`。**這種錯誤是靜默的**:一部沒看過的片,contact sheet 怎麼標都像是對的。
+3. 沒有 mpv 時三個進入點都不會生出任何行程。
+
+| 突變 | 結果 |
+|---|---|
+| fallback 只留下失敗的 | **CAUGHT** |
+| fallback 改成依位置 zip | **CAUGHT** |
+| 短少的快路徑照單全收 | **CAUGHT** |
+| 三個 `exe is None` 各自反過來 | **全部 CAUGHT** |
+
+再掃一次同樣那幾個模組,§9.22 列出的這幾個突變已經死了:`settings.py:65` 的白名單、`cache.py:76` 的 `SCRATCH_MAX_AGE`、`contact_sheets.py:170` 的兩個(`size > 0` 與 `== size`)、`contact_sheets.py:318` 的 `one is not None`、`resume.py:85` 的 `data.pop(...) is None`。
+
+#### 這一輪真正的教訓:**斷言錯了東西,守衛就等於沒釘**
+
+第三個測試的第一版是錯的,而且錯得很有代表性:**只斷言回傳值,三個突變全部存活。**
+
+```
+SURVIVED  guard inverted in def probe_duration
+SURVIVED  guard inverted in def _grab_frame_at
+SURVIVED  guard inverted in def _grab_evenly_spaced
+```
+
+原因:`if exe is None: return None` 反過來之後,函式會繼續往下拿 `None` 去組命令列 → `str(None)` = `"None"` → 想執行一個叫 `None` 的程式 → `FileNotFoundError` → **既有的 `except OSError` 又把它變回 `None`**。從外面看,突變體和正確的程式回傳一模一樣的東西。
+
+`guard` 真正的工作是「**不要生出行程**」,所以要斷言的是那件事。攔住 `subprocess.run` / `Popen` 並斷言零次呼叫之後,三個全部 CAUGHT。
+
+**跟 §9.22 那條並列著看:**
+
+- §9.22:突變沒套用上去 → 看起來像守衛失效。
+- §9.23:守衛沒被斷言到 → 看起來像守衛有效。
+
+**兩個方向都會騙人,而且都只有跑突變才看得出來。** 一個函式越是防禦性寫得好(`except OSError` 把每種失敗都收斂成同一個回傳值),它內部的分支就越難從回傳值上分辨——**這種函式要測的是它的副作用,不是它的答案。**
+
+#### 剩下沒動的
+
+`contact_sheets.py` 還有一些活著的突變,全部是同一類:`<=` 對 `<` 這種**只在剛好等於邊界時才不同**的翻轉,以及 `_grab_evenly_spaced` 內部要假的 `Popen` 才進得去的分支。前者收益低,後者要一整組行程假物件——列在這裡當作已知,不是漏掉。
