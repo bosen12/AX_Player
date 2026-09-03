@@ -396,3 +396,118 @@ def test_an_unknown_sort_mode_never_reaches_the_settings_file():
     assert settings.sort_mode() == settings.SORT_NAME
     stored = settings._s().value("library/sort")
     assert stored in settings.SORT_MODES, f"garbage reached the file: {stored!r}"
+
+
+def _make_jpeg(path: Path) -> Path:
+    image = contact_sheets.QImage(160, 90, contact_sheets.QImage.Format.Format_RGB32)
+    image.fill(contact_sheets.QColor("#334455"))
+    assert contact_sheets.QImage.save(image, str(path), "JPG", 85)
+    return path
+
+
+def test_a_short_fast_path_falls_back_to_one_process_per_frame(tmp_path, monkeypatch):
+    """The --sstep grab returns whatever has settled when it hits GRAB_TIMEOUT,
+    and a sheet is cached under a name that states its frame count and is never
+    revisited -- so accepting eight of nine cached an eight-cell sheet for good.
+
+    Nothing exercised this branch: an operator sweep could invert every `is
+    None` in the fallback and the suite stayed green.
+    """
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"x" * 64)
+    calls: list[float] = []
+
+    def short_grab(_video, first, _step, count, tmp_dir):
+        return [_make_jpeg(Path(tmp_dir) / f"fast{i:02d}.jpg") for i in range(count - 4)]
+
+    def one_at_a_time(_video, seconds, dest):
+        calls.append(seconds)
+        return _make_jpeg(dest)
+
+    monkeypatch.setattr(contact_sheets, "probe_duration", lambda _v: 900.0)
+    monkeypatch.setattr(contact_sheets, "_grab_evenly_spaced", short_grab)
+    monkeypatch.setattr(contact_sheets, "_grab_frame_at", one_at_a_time)
+
+    dest = contact_sheets.generate_contact_sheet(video)
+
+    assert dest is not None and dest.is_file()
+    assert len(calls) == contact_sheets.FRAME_COUNT, (
+        f"the fallback re-grabbed {len(calls)} of {contact_sheets.FRAME_COUNT} frames"
+    )
+
+
+def test_a_frame_the_fallback_cannot_grab_does_not_relabel_the_rest(tmp_path, monkeypatch):
+    """The pairing, which is the part with a trap in it.
+
+    Each fallback frame carries its own timestamp rather than being zipped
+    against `times` by position: a frame that will not decode is simply absent
+    from the list, so position i stops meaning times[i] and every later cell
+    would be captioned with the wrong time -- silently, because a contact sheet
+    of a video nobody has watched looks plausible either way.
+    """
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"x" * 64)
+    missing_index = 3
+    asked: list[float] = []
+    labelled: list[float] = []
+
+    def one_at_a_time(_video, seconds, dest):
+        asked.append(seconds)
+        if len(asked) - 1 == missing_index:
+            return None  # this timestamp genuinely will not decode
+        return _make_jpeg(dest)
+
+    real_format = contact_sheets._format_timestamp
+    monkeypatch.setattr(contact_sheets, "probe_duration", lambda _v: 900.0)
+    monkeypatch.setattr(contact_sheets, "_grab_evenly_spaced", lambda *a, **k: [])
+    monkeypatch.setattr(contact_sheets, "_grab_frame_at", one_at_a_time)
+    monkeypatch.setattr(
+        contact_sheets,
+        "_format_timestamp",
+        lambda seconds: (labelled.append(seconds), real_format(seconds))[1],
+    )
+
+    dest = contact_sheets.generate_contact_sheet(video)
+
+    assert dest is not None, "one undecodable timestamp lost the whole sheet"
+    expected = [s for i, s in enumerate(asked) if i != missing_index]
+    assert labelled == expected, (
+        "captions shifted after the gap: "
+        f"asked for {asked}, captioned {labelled}"
+    )
+
+
+def test_no_mpv_yet_returns_nothing_instead_of_raising(tmp_path, monkeypatch):
+    """Every entry point into the frame grabbers checks mpv_exe() first.
+
+    That is not hypothetical: a packaged first run has no mpv until the
+    bootstrap fetches it, and the sidebar starts asking for thumbnails and
+    sheets as soon as a folder is listed. Each of these runs on a pool thread,
+    where an exception has nowhere to go.
+
+    Three separate copies of the same guard, and asserting only on the return
+    value does not pin any of them: inverted, each one runs on and builds a
+    command line around `None`, which raises FileNotFoundError, which the
+    existing `except OSError` turns back into None. The mutant is invisible
+    from the outside -- measured, all three survived a first version of this
+    test that checked the return value alone.
+
+    So the assertion is that nothing is *spawned*. That is what the guard is
+    for, and it is the only thing the inverted version does differently.
+    """
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"x" * 64)
+    spawned: list[object] = []
+    monkeypatch.setattr(contact_sheets, "mpv_exe", lambda: None)
+    monkeypatch.setattr(contact_sheets.subprocess, "run", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(contact_sheets.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+
+    assert contact_sheets.probe_duration(video) is None
+    assert contact_sheets._grab_frame_at(video, 1.0, tmp_path / "out.jpg") is None
+    assert contact_sheets._grab_evenly_spaced(video, 0.0, 1.0, 3, tmp_path / "scratch") == []
+
+    monkeypatch.setattr(contact_sheets, "probe_duration", lambda _v: 900.0)
+    assert contact_sheets.generate_contact_sheet(video) is None, (
+        "a sheet was produced with no mpv to decode with"
+    )
+    assert spawned == [], f"tried to spawn {len(spawned)} process(es) with no mpv to spawn"
