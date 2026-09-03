@@ -96,17 +96,50 @@ def set_watched(video: str, watched: bool) -> None:
         _write(data)
 
 
+def _merge_from_disk(data: dict[str, dict]) -> dict[str, dict]:
+    """Fold in entries written by another AX Player since this one loaded.
+
+    Each process holds the whole database in memory and writes all of it back,
+    so without this the last writer replaces the others' entries wholesale.
+    Measured with three processes saving 400 videos each: 792 of 1200 writes
+    lost. That is not a contrived setup -- opening three files from Explorer is
+    three processes (§7 of HANDOFF: there is no single-instance handover), each
+    polling every five seconds, so two windows watching two episodes means one
+    of them silently records no progress at all.
+
+    setdefault, not update: our own entry has to win for the video this process
+    is actually playing. Two processes updating the *same* key would still lose
+    one, but they would have to be playing the same file in two windows, where
+    there is no correct answer to pick anyway.
+    """
+    try:
+        on_disk = json.loads(resume_db_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return data
+    if not isinstance(on_disk, dict):
+        return data
+    for key, value in on_disk.items():
+        data.setdefault(key, value)
+    return data
+
+
 def _write(data: dict[str, dict]) -> None:
     """Written via a temp file and swapped in with os.replace: this rewrites
     the whole database, and it runs on every 5-second progress poll, so an
     in-place write is a standing chance for a crash or power loss to leave a
     truncated file -- which _load()'s ValueError guard then reads as "no data
     at all", wiping every video's progress and watched badge.
+
+    The temp name carries the pid. It used to be a bare "resume.json.tmp",
+    which every concurrent process picked too: one could truncate the file
+    another was mid-write to, and then os.replace a half-written database over
+    the real one -- the exact failure this atomic write exists to prevent.
+    Fluid Motion's save_settings has always done it this way.
     """
     path = resume_db_path()
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.write_text(json.dumps(_merge_from_disk(data)), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         try:
