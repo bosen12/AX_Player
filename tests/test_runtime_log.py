@@ -75,3 +75,59 @@ def test_the_fetcher_and_the_log_agree_on_which_binaries_matter():
         assert f"'{binary}'" in logged or f'"{binary}"' in logged, (
             f"mpv_fetch downloads {binary} but the runtime log never reports it"
         )
+
+
+# -- which mpv root wins --------------------------------------------------
+def test_the_bundled_runtime_is_preferred_over_a_personal_install(tmp_path, monkeypatch):
+    """"a fresh install just works off setup_mpv.py alone" -- the bundled root
+    is checked first precisely so a machine that also has C:\mpv does not
+    quietly take it over.
+
+    Which root wins is not cosmetic: §9.20 turned on it. The root decides
+    whether yt-dlp.exe is there (so whether 開啟網址 resolves anything), and
+    whether VapourSynth is (so whether Fluid Motion's filter can load at all).
+
+    The candidate list is injected rather than left to the machine. The first
+    version of this test monkeypatched only bundled_mpv_root and asserted the
+    answer equalled it -- which deleting the whole search loop also satisfies,
+    because the fallback returns the same value. mpv_root_candidates() exists
+    so the two can be told apart.
+    """
+    from ax_player import paths
+
+    bundled = tmp_path / "bundled"
+    personal = tmp_path / "personal"
+    for root in (bundled, personal):
+        root.mkdir()
+        (root / "libmpv-2.dll").write_bytes(b"x")
+
+    monkeypatch.setattr(paths, "bundled_mpv_root", lambda: bundled)
+    monkeypatch.setattr(paths, "mpv_root_candidates", lambda: [bundled, personal])
+    paths.default_mpv_root.cache_clear()
+    try:
+        assert paths.default_mpv_root() == bundled, "a personal install took over"
+    finally:
+        paths.default_mpv_root.cache_clear()
+
+
+def test_a_personal_install_is_used_when_the_bundled_one_is_empty(tmp_path, monkeypatch):
+    """The other half, and the one that tells the search from the fallback:
+    with no libmpv in the bundled root the loop has to walk on, where the
+    fallback would stop at the bundled root and report a runtime that is not
+    there. _bootstrap_mpv_if_needed() tests exactly that path.
+    """
+    from ax_player import paths
+
+    bundled = tmp_path / "bundled"
+    personal = tmp_path / "personal"
+    bundled.mkdir()
+    personal.mkdir()
+    (personal / "libmpv-2.dll").write_bytes(b"x")
+
+    monkeypatch.setattr(paths, "bundled_mpv_root", lambda: bundled)
+    monkeypatch.setattr(paths, "mpv_root_candidates", lambda: [bundled, personal])
+    paths.default_mpv_root.cache_clear()
+    try:
+        assert paths.default_mpv_root() == personal, "stopped at a root with no libmpv"
+    finally:
+        paths.default_mpv_root.cache_clear()

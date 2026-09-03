@@ -74,6 +74,22 @@ def bundled_mpv_root() -> Path:
     return _project_root() / "mpv-runtime"
 
 
+def mpv_root_candidates() -> list[Path]:
+    """Where an mpv runtime might be, best first.
+
+    Split out of default_mpv_root() so the choice between them can be tested:
+    with the list inline, a test could only compare the answer against
+    bundled_mpv_root(), which is also the fallback -- so deleting the entire
+    search loop left the assertion green. Fluid Motion's paths.py has carried
+    the same helper under the same name all along.
+    """
+    return [
+        bundled_mpv_root(),
+        Path(r"C:\mpv"),
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "mpv",
+    ]
+
+
 @lru_cache(maxsize=1)
 def default_mpv_root() -> Path:
     # Cached: this is re-derived from libmpv_dll()/mpv_exe() on every
@@ -86,12 +102,7 @@ def default_mpv_root() -> Path:
     # IPC scripts already configured there), that one is still picked up
     # automatically as a fallback -- but only once bundled_mpv_root() has
     # no libmpv-2.dll of its own, i.e. setup_mpv.py was never run there.
-    candidates = [
-        bundled_mpv_root(),
-        Path(r"C:\mpv"),
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "mpv",
-    ]
-    for path in candidates:
+    for path in mpv_root_candidates():
         if (path / "libmpv-2.dll").is_file():
             return path
     return bundled_mpv_root()
