@@ -842,3 +842,68 @@ engine.set_on_show() 被呼叫                    t=72 ms
 1. **`Engine._on_change` 是接不上的死線頭。** 每個 tick 後都會呼叫它(`if self._on_change:`),但 `start()` 唯一的呼叫端是 `app.py:31` 的 `engine.start()`,不帶參數,而且只有 `set_on_show` 沒有 `set_on_change`。UI 其實是每 900ms 輪詢 `get_state()`(`app.js:527`)。屬於 §7「查過、判斷不值得動」第 6 條的死碼類別,**照那條判斷不動**,列在這裡是因為它看起來像「UI 有推播」,會誤導讀的人。
 2. **`tray_ok` 的兩個窄縫。** `tray_ok.set()` 在 `icon.run()` 之前,所以中間失敗會有一瞬間是「已設定但沒有圖示」;而 Explorer 重啟殺掉 tray 圖示之後 `tray_ok` 仍是 set,關視窗就變成沒有圖示的隱形行程。兩個都窄且不好驗證,沒有動。
 3. **`single.try_acquire` 的 `ctypes` 用法是對的。** `restype = c_void_p`(避開 CLAUDE.md 那個 64-bit handle 截斷的陷阱)、`use_last_error` 加註解、`CloseHandle` 明確包 `c_void_p`、handle 存在模組全域所以不會被回收。`Local\` 命名空間對一個 per-user 托盤程式也是對的。
+
+### 9.13 09-04:lua ↔ Python 的檔案協定。三件事查完,零修改
+
+單檔已經全部逐行讀過,這一輪換方向:**跨檔案、跨語言的狀態機**。`zz-fluid-ipc.lua` 與 watcher 之間共用三個檔案(`alive`、`hotkey`、`seek_hold-<pid>`),逐條對過契約。**三件事都量了,沒有一件值得改。**
+
+#### 1. 撤回:`0 <= hold_age` 不是生產環境的問題
+
+`_seek_hold_age()` 是 `time.time() - st_mtime`,而 `interpolation_held_off` 要求 `0 <= hold_age < max_age`。負數 → 答「沒有 held」→ tick 會把濾鏡裝回正在進行的 seek 裡,正是這個檔案存在要擋的事。§5.12 把這個時鐘錯位記成**測試**偶爾失敗的原因並用 `os.utime` 修了測試——但沒有問「生產環境會不會也中」。
+
+量了:
+
+| 直譯器 | `time.time()` 解析度 | 剛寫完立刻讀,負數比例 | 最糟的「未來」幅度 |
+|---|---|---|---|
+| **3.10** | 15.625 ms | **869 / 6000(14.5%)** | **−0.0002 ms** |
+| **3.14** | 0.0001 ms | **0 / 6000** | — |
+
+**兩件事讓它不成立。**(1)幅度是 **200 奈秒**,不是毫秒——那是同一個 15.6ms 時鐘刻度內的捨入,不是真的時鐘偏差。(2)**3.14 上完全不發生**,而 `build.bat` 用 `py -3` 就是 3.14,**出貨的執行檔不受影響**;3.10 只是測試用直譯器。
+
+再加上讀取時機:seek 進行中 `seeking` 為真,`interpolation_held_off` 走的是第一個分支、根本不看年齡;要中就得讓 tick 剛好落在最後一次 `touch_seek_hold()` 之後的同一個 15.6ms 刻度內、而且 `seeking` 已經清掉。
+
+**§5.12 的結論是對的**,這裡只是補上「為什麼」——那個原因是直譯器的時鐘解析度,值得寫下來因為它會被重新推導一次。
+
+#### 2. 查過、判斷不值得動:heartbeat 的 truncate race(§8.4 第 4 條的鏡像)
+
+`_write_heartbeat` 是 `write_text`,不是原子寫入。lua 的 `fluid_alive()` 若剛好讀在 truncate 與寫入之間會拿到空字串,`tonumber` 回 nil → 判定 Fluid Motion 沒在跑。後果比 hotkey 那個方向重一點:`strip_stale()` 會**把濾鏡拆掉**、`begin_seek_hold()` 不會建立 hold(那次 seek 就慢)、F3 會說「請先開啟 Fluid Motion」。
+
+量了寫入視窗(3000 次,已排除首次建立成本):
+
+```
+median 101us   p95 180us   max 5722us
+1 秒寫一次 -> duty cycle 中位數 0.0101%
+一次 lua 讀取大約 1/9,862 的機率落在裡面
+```
+
+**跟 §8.4 第 4 條同一個數量級、同一個判斷:不動。** 改成原子寫入(FM 的 `save_settings` 已經有那個模式)要為一個萬分之一、可自行恢復的事件,每天多做 86,400 次 rename,還多一個 `.tmp` 殘留的失敗模式。
+
+#### 3. 第一次端到端驗證:AX 標題列那顆鈕真的會走到 Fluid Motion
+
+四個元件、三種語言:
+
+```
+AXPlayerWindow.toggle_fluid_motion
+  -> PlayerWidget._mpv_cmd("keypress", "F3")
+    -> mpv input handler -> script-binding zz_fluid_ipc/fluid-toggle
+      -> zz-fluid-ipc.lua toggle_fluid()
+        -> 寫 "on" 進 %APPDATA%\FluidMotion\hotkey
+          -> Engine._consume_hotkey
+```
+
+中間那一段最可疑:`keypress F3` 不是實體按鍵,而那是個 **script** binding 不是 input.conf 指令。`_ensure_player_scripts` 的註解記著曾經確認「那顆鈕是 silent no-op」的年代,但那是因為腳本根本不在 AX 的設定目錄裡;修好之後沒有人整條走過一次。
+
+實跑(APPDATA 導到暫存目錄,否則會去切換使用者真的在跑的那一份;env 是**完整複製只換一個 key**,不是精簡 env——§1.1 為了精簡 env 花掉一整個版本):
+
+```
+connected on: \\.\pipe\fluid-mpv-32736
+mpv says input-ipc-server = 'fluid-mpv-32736'   (命令列要的是 'axf3-49584')
+F3 binding in AX's own mpv-runtime: ['zz_fluid_ipc']
+
+沒有 alive heartbeat  -> hotkey 檔沒被寫  (正確,lua 應該拒絕)
+有 alive heartbeat    -> hotkey 檔內容 'on'
+```
+
+**整條通。** 順帶又獨立證實了 §9.10 那個更正過的機制:AX 的 `mpv-runtime` 裡沒有 mpvSockets.lua,所以 zz-fluid-ipc.lua 的 `set_property` **贏過了命令列選項**——「後寫的贏」,而 `C:\mpv` 裡 mpvSockets 之所以贏只是因為它卡在 `utils.subprocess` 上、寫得更晚。
+
+**這條不寫成測試**:它需要真的 mpv 子行程,而 FM 的測試守則是「用 `_FakeIpc`,不碰真 mpv、不需要 GPU」。記在這裡,附上重跑用的腳本形狀。
