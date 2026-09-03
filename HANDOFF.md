@@ -594,3 +594,41 @@ AMD 支援的實作分成五層，細節在 `Fluid_Motion_Player/CLAUDE.md`。�
 **5. OSD 寫死 "TensorRT"。** 這是 §9.1 那輪 AMD 後端留下的漏網之魚,而且諷刺:這行字唯一會出現的錯誤場合,正是 ncnn 後端存在的理由。`backend_label()` 收在 `vs_script`,與 `.vpy` 檔頭、`app.js` 的 `backendName()` 三處同一措辭。
 
 **方法論上值得記的一件事:** 第 1 項的後果,是讀了 `zz-fluid-ipc.lua` 才確定的——Python 這側完全看不出 `strip_stale` 沒有週期性 timer。跨語言的狀態機,不讀另一半就不算查過。
+
+### 9.8 09-04:`mpv_ipc.py` 逐行讀完,一個 37 秒的批次讀取
+
+`mpv_ipc.py`(243 行)是 §9.7 沒讀到的那個。逐行讀完只找到一個缺陷,但它不小。
+
+**沒有答覆的 mpv,一次 `snapshot_playback` 要 37.6 秒。** mpv 用單一執行緒服務 IPC,所以「問不到」從來不是個別屬性的事實:一個停止回應的播放器(**正在編譯 TensorRT engine 就是最普通的到達方式**)十五個屬性一個都不答。而 `snapshot_playback` 的 `_get` 是逐一 `try/except IpcError`,每一次都把 `command()` 的 2.5 秒逾時走完。
+
+實測(真的 `MpvIpc`,只把 handle 換成「收下寫入、永不回覆」;win32 分支 peek 到空就立刻回 `b""`,socket 分支 0.15 秒逾時後回 `b""`,兩條都會空轉到 deadline):
+
+| | 修正前 | 修正後 |
+|---|---|---|
+| 單次 `get()` | 2.501 s | 2.507 s |
+| `snapshot_playback()` | **37.647 s / 15 個指令** | **2.508 s / 1 個指令** |
+| 回傳內容 | `vf_ok=False, media='', fps=''` | 完全相同 |
+
+**關鍵在最後一列:那 37 秒買不到任何東西。** 每個欄位拿回來的都是第一次失敗後就已經定案的同一個預設值——跟 §9.3 `set_playing` 那條同一個形狀:**那些工作不可能改變任何結果**。而 `TICK_SECONDS` 是 0.3,`tick()` 又是逐一走播放器的,所以第二台播放器也一起等。
+
+修法是**一份預算給整批,不是每次讀取各一份**:`snapshot_playback` / `rate_snapshot` 開頭算 deadline,`_get` 把剩餘時間當逾時傳下去,剩餘不足就直接回預設。預算取一個指令的逾時(`COMMAND_TIMEOUT = 2.5`)——一批讀取不該比它已經被允許花掉的那一次卡住的讀取更貴。會答的 mpv 完全不受影響:`rate_snapshot` 的 docstring 自己記著忙碌時全套約 230 ms,只有預算的十分之一。
+
+`rate_snapshot` 是同一個缺陷的小號版本(3 次讀取 = 7.5 秒),但它是從 bridge 執行緒進來的,所以那筆錢是花在視窗上而不是背景 tick 上。一併改了。
+
+**兩個實作細節值得記:**
+
+1. **截止判斷不能寫 `remaining <= 0`。** `_command_locked` 的 deadline 用 `time.time()`,批次預算用 `time.monotonic()`,兩個時鐘的取整讓第一次逾時結束時剩餘值落在 0 的兩側各半——實測有一半的時候會放第二個註定失敗的指令上線。改成 `_MIN_READ = 0.005` 才是確定的。順帶:負的 `remaining` 傳進 `lock.acquire(timeout=)` 會直接 `ValueError`,所以那個下限也是正確性的一部分。
+2. **`_FakeIpc.get()` 全部不吃 `timeout`。** 五個測試檔的假物件加起來 26 個測試立刻紅——這是好事,它證明那些測試真的走到 `ipc.get`。但也說明假物件與 `MpvIpc` 的介面沒有任何東西在對齊,改一個關鍵字就是這個規模。
+
+**突變驗證(先跑不突變的對照組:238 passed):**
+
+| 突變 | 結果 |
+|---|---|
+| 把 `_get` 還原成修正前的樣子(每次讀取各拿完整逾時) | **CAUGHT** —— 14 個指令、45.5 秒 |
+| `SNAPSHOT_BUDGET = 0.0`(預算把會答的播放器也砍掉) | **CAUGHT** —— `vf` 沒被問到 |
+
+第二個突變是刻意加的:**用預算換速度最容易的漏法,是連健康的播放器也少讀幾個屬性**——那會把「面板凍住」換成「面板空白」,是更糟的 bug。所以測試有一半在盯著這件事(`test_the_budget_does_not_cut_a_player_that_is_answering`,健康路徑必須讀滿 14 個;14 不是 15,因為 `filename` 只在 `media-title` 空的時候才問)。
+
+事後 sha256 確認 `inject.py` 完全還原,全套 238 passed。
+
+**順手改掉的一句過時文件:** FM 的 `CLAUDE.md` 寫著 `api.py`「currently has **no tests**;...nothing pins that the bridge keeps routing through it」。`tests/test_bridge.py` 有 6 個測試,第一個就叫 `test_settings_go_through_validation_not_straight_onto_the_dataclass`。用 `git merge-base --is-ancestor` 確認過寫 CLAUDE.md 的 commit 是加測試那個 commit 的祖先——寫的當下是對的,後來沒回頭改。
