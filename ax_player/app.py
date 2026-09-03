@@ -847,18 +847,30 @@ class AXPlayerWindow(QWidget):
             event.acceptProposedAction()
 
     def open_dropped(self, uris: list[str]) -> None:
-        urls = [QUrl(u) for u in uris if u]
-        if not urls:
+        # Classified rather than fed to QUrl directly. QUrl.isLocalFile() is
+        # False both for a real web link *and* for anything unrecognisable,
+        # so plain dropped text fell through to play_url() -- and that issues
+        # `loadfile replace`, so a mis-drag of ordinary selected text stopped
+        # playback and emptied the playlist. A bare Windows path dragged as
+        # text hit the same branch, because QUrl reads its drive letter as the
+        # scheme. See dnd.classify.
+        kinds = [dnd.classify(u) for u in uris if u]
+        kinds = [(kind, text) for kind, text in kinds if kind]
+        if not kinds:
             return
-        if not urls[0].isLocalFile():
+        first_kind, first_text = kinds[0]
+        if first_kind == dnd.URL:
             # A dragged web link (e.g. from a browser) rather than a local
             # file -- QUrl.toLocalFile() would silently return "" for this,
             # which as a Path resolves to ".", so this has to be handled
             # before falling into the local-file branch below at all.
-            self.play_url(urls[0].toString())
+            self.play_url(first_text)
             return
-        paths = [Path(u.toLocalFile()) for u in urls]
-        paths = [p for p in paths if str(p)]
+        paths = [
+            Path(QUrl(text).toLocalFile()) if kind == dnd.FILE else Path(text)
+            for kind, text in kinds
+        ]
+        paths = [p for p in paths if str(p) and str(p) != "."]
         if not paths:
             return
         first = paths[0]
