@@ -632,3 +632,43 @@ AMD 支援的實作分成五層，細節在 `Fluid_Motion_Player/CLAUDE.md`。�
 事後 sha256 確認 `inject.py` 完全還原,全套 238 passed。
 
 **順手改掉的一句過時文件:** FM 的 `CLAUDE.md` 寫著 `api.py`「currently has **no tests**;...nothing pins that the bridge keeps routing through it」。`tests/test_bridge.py` 有 6 個測試,第一個就叫 `test_settings_go_through_validation_not_straight_onto_the_dataclass`。用 `git merge-base --is-ancestor` 確認過寫 CLAUDE.md 的 commit 是加測試那個 commit 的祖先——寫的當下是對的,後來沒回頭改。
+
+### 9.9 09-04:AX 三個模組讀完,零修改。一條假設撤回,一支量測工具作廢
+
+挑檔的方式跟 §9.5 一樣:**先問哪些模組完全沒有測試**。`thumbnails.py`(96 行)和 `diagnostics.py`(79 行)是 AX 僅存的兩個,兩個都整份讀完;`player_widget.py`(504 行)只被一個測試檔碰到,也整份讀完。**三個都沒有找到站得住的缺陷**,這一節記的是查了什麼、以及兩件不該被重複的事。
+
+**驗過是對的(不必再查):**
+
+- `diagnostics.query_gpu()` 的五個欄位一次問完,任何一個不被支援就整批失敗、面板全空。實際跑過這台機器上的那條指令:`nvidia-smi --query-gpu=utilization.gpu,utilization.decoder,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits` → `0, 0, 9252, 16303, 38`,exit 0。**`utilization.decoder` 是有效欄位**,沒有這個問題。
+- `thumbnails._grab_frame` 的暫存目錄帶 pid、`produced.replace(dest)` 同磁碟區所以是原子的、失敗不檢查 returncode 而是看有沒有產出檔案——三件都是對的,而且註解已經寫明為什麼。
+
+**撤回一條假設:「修飾鍵先放開會讓按鍵卡在 mpv 裡」。**
+
+`PlayerWidget` 的 mpv 按鍵名是**在事件當下**由 `event.modifiers()` 組出來的。按 Ctrl+1 → `keydown Ctrl+1`;先放開 Ctrl 再放開 1(很常見的順序)→ 放開事件已經沒有修飾鍵 → `keyup 1`。名字對不上,推論是 mpv 會一直以為 `Ctrl+1` 還按著。
+
+拿真的 mpv 問過,不是用推的。把 `Ctrl+1` 綁成 `add volume 1`,答案就從判斷題變成計數器:
+
+```
+mpv v0.41.0-920-gdd5d17d32,input-ar-delay=200ms rate=40/s
+  baseline                            volume=0.0
+  +0.25s after keydown Ctrl+1         volume=4.0
+  +1.25s, still held                  volume=45.0
+  +1.0s after keyup 1 (mismatched)    volume=45.0     <-- 停了
+  +0.6s after keyup Ctrl+1 (matching) volume=45.0
+  控制組:成對的 keydown/keyup 相隔 0.05s  volume=1.0
+```
+
+**兩個事實。**(1)`keydown` 之後 mpv 會自己以 `input-ar-rate` 重複下去——1.25 秒 45 次,所以「按鍵卡住」如果真的發生,代價不是一次而是每秒 40 次。(2)**但名字對不上的 `keyup` 一樣把它放掉了**,而且沒有觸發 `1` 自己的綁定(不然會是 145 不是 45)。mpv 的 input 只記一個 last-key-down,`keyup` 放的是那一個,不管你報什麼名字。**所以這條假設不成立,`PlayerWidget` 現在的寫法是安全的。**
+
+**一支量測工具作廢,記在這裡免得有人引用它的輸出。**
+
+上面那條撤回之後,剩下的問題是:**按著鍵時焦點被搶走(Alt+Tab、通知視窗),Qt 還會不會送出 keyReleaseEvent?** 如果不會,依照事實(1)那就是每秒 40 次跑不停。
+
+寫了一支探針想用真的 OS 輸入(`SendInput`)加真的焦點轉移來量。結果:
+
+- 第一次 `GetForegroundWindow() != mine` 就 ABORT —— Windows 不讓沒收過輸入的行程搶前景。這一半是好的,守衛有作用。
+- 加了 `AttachThreadInput` + `SetForegroundWindow` 之後視窗確實拿到前景(`isActiveWindow=True`、`hasFocus=True`),**但 `SendInput` 送的 `VK_F13` 連 keyPress 都沒有進到 widget** —— 事件清單是空的。
+
+**所以「release delivered: False」這個輸出完全不能當證據** ——連對照組(按下去有沒有收到)都沒有成立,那一行只是在說「什麼都沒收到」。§5.2 的那句話又應驗一次:**測量工具本身會騙人**。懷疑是 `wVk` 帶 `wScan=0` 時 Qt 這條路徑收不到,但那也只是假設。
+
+**這個問題因此仍然是開的,不要引用上面那支探針。** 要真的量,得換成有效掃描碼的按鍵,而那就會在焦點萬一跑掉時打進使用者正在用的視窗——所以下一次做之前先想清楚怎麼隔離(獨立桌面 / `CreateDesktop`,或者乾脆接受用合成事件只驗 `focusOutEvent` 這一半)。
