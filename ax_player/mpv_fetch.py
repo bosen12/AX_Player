@@ -65,7 +65,21 @@ def _download(url: str, dest: Path, on_progress: Callable[[str], None] | None) -
     partial = dest.with_name(f"{dest.name}.{os.getpid()}.part")
     try:
         with urllib.request.urlopen(url, timeout=300) as resp, open(partial, "wb") as fh:
+            expected = int(resp.headers.get("Content-Length") or 0)
             shutil.copyfileobj(resp, fh)
+        # copyfileobj stops at EOF, and a connection cut mid-body looks exactly
+        # like the end of one -- so a truncated response was renamed onto dest
+        # as though it were whole. Demonstrated against a server declaring 5 MB
+        # and sending 1: no error, 1 MB landed. That is precisely the failure
+        # this docstring is about, arriving through the network rather than
+        # through a crash, and fetch_binaries' "skip what exists" means the
+        # broken binary is never fetched again.
+        received = partial.stat().st_size
+        if expected and received != expected:
+            raise RuntimeError(
+                f"{dest.name} 下載不完整（收到 {received / 1e6:.1f} MB，"
+                f"應為 {expected / 1e6:.1f} MB）"
+            )
         partial.replace(dest)
     finally:
         partial.unlink(missing_ok=True)

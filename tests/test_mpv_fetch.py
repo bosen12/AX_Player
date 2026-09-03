@@ -22,11 +22,16 @@ from ax_player import mpv_fetch
 
 
 class _Response:
-    """Just enough of urlopen's return for shutil.copyfileobj."""
+    """Just enough of urlopen's return for shutil.copyfileobj.
 
-    def __init__(self, payload: bytes):
+    `declared` is what the server *claims* in Content-Length, which is not
+    always what it sends -- that gap is the whole point of one test below.
+    """
+
+    def __init__(self, payload: bytes, declared: int | None = None):
         self._payload = payload
         self._read = False
+        self.headers = {"Content-Length": str(len(payload) if declared is None else declared)}
 
     def read(self, size=-1):
         if self._read:
@@ -154,3 +159,55 @@ def test_a_missing_member_raises_rather_than_landing_nothing(tmp_path):
 
     assert not (runtime / "libmpv-2.dll").exists()
     assert list(runtime.glob(".stage-*")) == [], "a staging directory survived the failure"
+
+
+def test_a_truncated_response_is_refused_rather_than_renamed_into_place(monkeypatch, tmp_path):
+    """copyfileobj stops at EOF, and a connection cut mid-body looks exactly
+    like the end of one -- so a short read was renamed onto dest as though it
+    were whole.
+
+    Demonstrated against a real HTTP server declaring 5 MB and sending 1: no
+    error raised, 1 MB landed. fetch_binaries skips whatever exists, so that
+    truncated 30 MB DLL is then never fetched again -- the failure this
+    module's docstring is about, arriving over the network instead of through
+    a crash.
+    """
+    monkeypatch.setattr(
+        mpv_fetch.urllib.request,
+        "urlopen",
+        lambda _url, timeout=None: _Response(b"x" * 1000, declared=5000),
+    )
+
+    dest = tmp_path / "libmpv-2.dll"
+    with pytest.raises(RuntimeError, match="不完整"):
+        mpv_fetch._download("https://example/x", dest, None)
+
+    assert not dest.exists(), "a truncated file was renamed into place"
+    assert list(tmp_path.glob("*.part")) == [], "staging survived the failure"
+
+
+def test_a_complete_response_still_lands(monkeypatch, tmp_path):
+    """The control: the size check must not reject a good download."""
+    monkeypatch.setattr(
+        mpv_fetch.urllib.request,
+        "urlopen",
+        lambda _url, timeout=None: _Response(b"x" * 2048),
+    )
+
+    dest = tmp_path / "yt-dlp.exe"
+    mpv_fetch._download("https://example/x", dest, None)
+
+    assert dest.stat().st_size == 2048
+
+
+def test_a_server_that_declares_nothing_is_not_second_guessed(monkeypatch, tmp_path):
+    """Chunked responses carry no Content-Length. There is nothing to compare
+    against, so the check has to stand down rather than reject everything."""
+    resp = _Response(b"x" * 512)
+    resp.headers = {}
+    monkeypatch.setattr(mpv_fetch.urllib.request, "urlopen", lambda _url, timeout=None: resp)
+
+    dest = tmp_path / "mpv.exe"
+    mpv_fetch._download("https://example/x", dest, None)
+
+    assert dest.stat().st_size == 512
