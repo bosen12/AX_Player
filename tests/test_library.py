@@ -4,10 +4,12 @@ from pathlib import Path
 
 from ax_player import resume, settings
 from ax_player.app import (
+    THUMB_POOL_MAX,
     AXPlayerWindow,
     _emit_safely,
     _ScanJob,
     _sort_playlist,
+    _thumb_pool_size,
 )
 
 
@@ -506,3 +508,39 @@ def test_reopening_the_folder_is_what_gives_a_failed_row_another_chance(monkeypa
     AXPlayerWindow.open_folder(w, Path("vids"))
 
     assert w._requested_thumbs == set()
+
+
+# -- how many frame-grabs may run at once ---------------------------------
+def test_a_small_machine_gets_fewer_grabs_than_it_used_to():
+    """The old rule was min(max(cpu_count, 2), 4), i.e. 4 on anything with four
+    or more cores -- a four-core laptop with integrated graphics gave every one
+    of them to background thumbnailing while a video was playing.
+
+    That is the machine the measurement behind THUMB_POOL_MAX could not cover
+    (24 logical CPUs, RTX 5070 Ti here), so the formula has to be *lower* than
+    the old constant wherever it is in doubt, not just higher where it is not.
+    """
+    assert _thumb_pool_size(4) == 2, "a four-core machine kept the old cap"
+    assert _thumb_pool_size(6) == 3
+    assert _thumb_pool_size(8) == 4, "eight cores is where it matches the old 4"
+
+
+def test_a_big_machine_is_allowed_more_but_not_unbounded():
+    """Measured with a 1080p HEVC file playing on gpu-next, 12 uncached 1080p
+    HEVC grabs: cap 4 2.12s, cap 8 1.43s, cap 12 1.24s, and zero dropped or
+    delayed frames at every setting. 8 is the knee -- 8 to 12 buys 0.19s -- and
+    a ceiling is what keeps a queued folder from becoming one process per file.
+    """
+    assert _thumb_pool_size(16) == THUMB_POOL_MAX
+    assert _thumb_pool_size(24) == THUMB_POOL_MAX
+    assert _thumb_pool_size(128) == THUMB_POOL_MAX, "no ceiling at all"
+
+
+def test_the_pool_never_collapses_to_a_single_worker():
+    """os.cpu_count() returns None when it cannot tell, and 1 exists. Either
+    one dropping the pool to a single thread would serialise a folder open
+    behind one mpv process at a time.
+    """
+    assert _thumb_pool_size(None) == 2
+    assert _thumb_pool_size(1) == 2
+    assert _thumb_pool_size(0) == 2

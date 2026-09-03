@@ -50,6 +50,40 @@ RESIZE_MARGIN = 6
 # How many of a folder's contact sheets to generate before being asked.
 EAGER_SHEET_LIMIT = 12
 
+# Ceiling on concurrent frame-grab subprocesses. 8 is where the curve flattens,
+# measured rather than picked -- see _thumb_pool_size.
+THUMB_POOL_MAX = 8
+
+
+def _thumb_pool_size(cpu_count: int | None) -> int:
+    """How many frame-grabs may run at once.
+
+    The old rule was `min(max(cpu_count, 2), 4)`, which is 4 on every machine
+    with four or more cores -- so it neither used a big one nor protected a
+    small one, and its stated reason (avoiding "thumbfast: cannot create mpv
+    subprocess") was disproved in v1.1.5.
+
+    Measured properly instead: 12 uncached 1080p HEVC clips (8 Mbps, 250-frame
+    GOP, which is what --start=10% has to decode through), *while a 1080p HEVC
+    file was playing on gpu-next with hwdec*, since running against live
+    playback is the only case this cap exists for.
+
+        cap  2   2.96s      cap  8   1.43s
+        cap  4   2.12s      cap 12   1.24s
+
+    Zero dropped and zero delayed frames at every setting, playback advancing
+    at 1.01-1.05x wall throughout -- so on this hardware the burst cost the
+    video nothing. 8 is the knee: 4 -> 8 buys 0.69s, 8 -> 12 buys 0.19s.
+
+    Halved rather than raised flat, because the measurement is one machine and
+    a strong one (24 logical CPUs, RTX 5070 Ti). This formula is *lower* than
+    the old constant 4 for anything up to eight CPUs -- a four-core laptop with
+    integrated graphics, the case that cannot be tested here, now gets 2 -- and
+    only goes above it from ten up.
+    """
+    cores = cpu_count or 4
+    return min(max(cores // 2, 2), THUMB_POOL_MAX)
+
 
 def _emit_safely(signal, *args) -> None:
     """Emit unless the receiving object has already been torn down.
@@ -289,14 +323,10 @@ class AXPlayerWindow(QWidget):
         # It is *not* capped to avoid "thumbfast: cannot create mpv
         # subprocess", which this comment claimed until now and HANDOFF §1.1
         # disproved in v1.1.5 (the cause is the `env` argument; 30 concurrent
-        # grabs left thumbfast-style launches at 0/6 failures). Raising it was
-        # then measured on 16 synthetic 720p clips: cap 8 ran 26% faster than
-        # cap 4 with no failures -- but those clips decode in 170ms against
-        # the ~1.2s §7 measured for a real episode, and nothing in that
-        # benchmark was playing a video at the time, which is the case that
-        # actually matters. Left at 4 until it is measured against that.
+        # grabs left thumbfast-style launches at 0/6 failures). The number
+        # itself is measured against live playback -- see _thumb_pool_size.
         self._thumb_pool = QThreadPool(self)
-        self._thumb_pool.setMaxThreadCount(min(max(os.cpu_count() or 4, 2), 4))
+        self._thumb_pool.setMaxThreadCount(_thumb_pool_size(os.cpu_count()))
         self._requested_thumbs: set[str] = set()
         self._requested_sheets: set[str] = set()
 
