@@ -1,0 +1,156 @@
+"""Staging for the first-run download, which had no tests.
+
+Everything here is about the same hazard, and it is not hypothetical: there is
+no single-instance handover (HANDOFF §7), the first run pulls 79 MB behind a
+progress dialog, and double-clicking the exe again because "nothing happened"
+is an ordinary thing to do. Two processes then shared every staging path.
+
+Measured on Windows: two writers on one path do not exclude each other, they
+interleave, and the file ends up holding bytes from both. `fetch_binaries`
+skips anything that merely exists, so that corrupt binary is renamed into
+place looking complete and is never re-fetched.
+"""
+from __future__ import annotations
+
+import os
+import tarfile
+from pathlib import Path
+
+import pytest
+
+from ax_player import mpv_fetch
+
+
+class _Response:
+    """Just enough of urlopen's return for shutil.copyfileobj."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self._read = False
+
+    def read(self, size=-1):
+        if self._read:
+            return b""
+        self._read = True
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def test_the_download_stages_under_a_name_only_this_process_uses(monkeypatch, tmp_path):
+    seen: list[str] = []
+
+    def fake_open(_url, timeout=None):
+        # Whatever staging path exists at this moment is the one being written.
+        seen.extend(p.name for p in tmp_path.glob("*.part"))
+        return _Response(b"binary payload")
+
+    monkeypatch.setattr(mpv_fetch.urllib.request, "urlopen", fake_open)
+
+    # The staging file only exists during the write, so it is captured from
+    # inside the request rather than looked for afterwards.
+    def fake_copy(resp, fh):
+        seen.extend(p.name for p in tmp_path.glob("*.part"))
+        fh.write(resp.read())
+
+    monkeypatch.setattr(mpv_fetch.shutil, "copyfileobj", fake_copy)
+
+    dest = tmp_path / "libmpv-2.dll"
+    mpv_fetch._download("https://example/x", dest, None)
+
+    assert dest.read_bytes() == b"binary payload"
+    assert seen, "the staging file was never observed"
+    assert any(str(os.getpid()) in name for name in seen), (
+        f"staging name is shared between processes: {seen}"
+    )
+
+
+def test_nothing_is_left_behind_when_the_download_fails(monkeypatch, tmp_path):
+    """The half-written file must not survive: fetch_binaries skips whatever
+    exists, so a leftover is never re-fetched and every URL then fails inside
+    mpv's ytdl_hook with nothing to say why."""
+    def fake_open(_url, timeout=None):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(mpv_fetch.urllib.request, "urlopen", fake_open)
+
+    dest = tmp_path / "yt-dlp.exe"
+    with pytest.raises(OSError):
+        mpv_fetch._download("https://example/x", dest, None)
+
+    assert not dest.exists()
+    assert list(tmp_path.glob("*.part")) == [], "a staging file survived the failure"
+
+
+def _archive(tmp_path: Path, member: str, payload: bytes) -> Path:
+    src = tmp_path / member
+    src.write_bytes(payload)
+    arc = tmp_path / "bundle.tar"
+    with tarfile.open(arc, "w") as tf:
+        tf.add(src, arcname=member)
+    src.unlink()
+    return arc
+
+
+def test_extraction_lands_the_member_and_leaves_no_staging(tmp_path):
+    """tar writes its output directly, so two processes extracting the same
+    member into one directory fight over it the same way two downloads to one
+    .part do. Staged per process and renamed in, so each run lands a complete
+    file and the loser is merely redundant."""
+    payload = b"MZ" + b"\x00" * 4094
+    arc = _archive(tmp_path, "mpv.exe", payload)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    mpv_fetch._extract_member(arc, "mpv.exe", runtime)
+
+    assert (runtime / "mpv.exe").read_bytes() == payload
+    assert [p for p in runtime.iterdir() if p.is_dir()] == [], "a staging directory survived"
+
+
+def test_extraction_stages_where_only_this_process_writes(monkeypatch, tmp_path):
+    """Asserted on the directory tar is actually told to write into.
+
+    The first version of this test only checked that no `.stage-*` glob
+    survived, which a shared `.stage` also satisfies -- it is cleaned up
+    either way, and a single-process extraction works regardless. It passed
+    against a mutation that removed the pid, so it was testing the cleanup and
+    not the property it claimed.
+    """
+    arc = _archive(tmp_path, "mpv.exe", b"MZ")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    told: list[str] = []
+    real_run = mpv_fetch.subprocess.run
+
+    def spy(args, **kwargs):
+        told.append(args[args.index("-C") + 1])
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(mpv_fetch.subprocess, "run", spy)
+
+    mpv_fetch._extract_member(arc, "mpv.exe", runtime)
+
+    assert told, "tar was never invoked"
+    assert str(os.getpid()) in told[0], (
+        f"tar was pointed at a directory other processes share: {told[0]}"
+    )
+    assert Path(told[0]).parent == runtime, (
+        "staging has to sit on the destination's volume for the rename to be atomic"
+    )
+
+
+def test_a_missing_member_raises_rather_than_landing_nothing(tmp_path):
+    arc = _archive(tmp_path, "mpv.exe", b"MZ")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    with pytest.raises(Exception):
+        mpv_fetch._extract_member(arc, "libmpv-2.dll", runtime)
+
+    assert not (runtime / "libmpv-2.dll").exists()
+    assert list(runtime.glob(".stage-*")) == [], "a staging directory survived the failure"

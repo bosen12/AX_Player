@@ -11,6 +11,7 @@ where (the official mpv-player-windows builds).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -48,10 +49,20 @@ def _download(url: str, dest: Path, on_progress: Callable[[str], None] | None) -
     died halfway used to leave a truncated binary that looked finished for
     good: a half-written yt-dlp.exe is never re-fetched, and every URL then
     fails inside mpv's ytdl_hook with nothing to say why.
+
+    The staging name carries the pid, because that reasoning was right about
+    one process and blind to two. There is no single-instance handover (§7 of
+    HANDOFF), and the first run downloads 79 MB behind a progress dialog --
+    double-clicking the exe again because "nothing happened" is an ordinary
+    thing to do. Both processes then opened the same `.part`: measured on
+    Windows, two writers on one path do not exclude each other, they
+    interleave, and the file ends up holding bytes from both. That corrupt
+    30 MB DLL is then renamed into place looking complete, and never
+    re-fetched.
     """
     if on_progress:
         on_progress(f"下載中：{dest.name}")
-    partial = dest.with_name(dest.name + ".part")
+    partial = dest.with_name(f"{dest.name}.{os.getpid()}.part")
     try:
         with urllib.request.urlopen(url, timeout=300) as resp, open(partial, "wb") as fh:
             shutil.copyfileobj(resp, fh)
@@ -61,11 +72,30 @@ def _download(url: str, dest: Path, on_progress: Callable[[str], None] | None) -
 
 
 def _extract_member(archive: Path, member: str, dest_dir: Path) -> None:
-    subprocess.run(
-        ["tar", "-xf", str(archive), "-C", str(dest_dir), member],
-        check=True,
-        creationflags=_CREATE_NO_WINDOW,
-    )
+    """Unpack one member, staging it so a concurrent run cannot be seen.
+
+    tar writes its output file directly, so two processes extracting the same
+    member into the same directory fight over it exactly the way two
+    downloads to one `.part` do -- and the result is a binary that looks
+    finished. Extracted into a per-process subdirectory of the destination
+    (same volume, so the move is an atomic rename) and only then swapped into
+    place: two runs each land a complete file, and the loser is merely
+    redundant rather than corrupt.
+    """
+    stage = dest_dir / f".stage-{os.getpid()}"
+    stage.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["tar", "-xf", str(archive), "-C", str(stage), member],
+            check=True,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        extracted = stage / member
+        if not extracted.is_file():
+            raise RuntimeError(f"{member} not found in {archive.name}")
+        extracted.replace(dest_dir / member)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def fetch_binaries(runtime_dir: Path, on_progress: Callable[[str], None] | None = None) -> None:
