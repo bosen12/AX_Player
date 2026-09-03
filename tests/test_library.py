@@ -402,3 +402,62 @@ def test_side_buttons_keep_the_plain_name_because_mpv_rejects_theirs():
         Qt.MouseButton.RightButton,
     }
     assert Qt.MouseButton.BackButton not in _MOUSE_BUTTONS_DBL
+
+
+# -- 含子資料夾 has to actually do something -------------------------------
+def _toggle_window(recursive=False, folder=Path(r"C:\V"), current=None):
+    calls = []
+    return types.SimpleNamespace(
+        _recursive=recursive, _folder=folder, _current=current, _calls=calls,
+        open_folder=lambda f, **kw: calls.append((str(f), kw)),
+    ), calls
+
+
+def test_ticking_include_subfolders_re_lists_the_folder(monkeypatch):
+    """It set the flag and stopped, so the list did not change until the next
+    F5 or reopen and the checkbox looked broken.
+
+    Sidebar.restore_state blocks its signals "to avoid immediately triggering
+    a rescan of a folder that isn't open yet" -- which is only worth doing if
+    a real toggle rescans. The code disagreed with its own note.
+    """
+    monkeypatch.setattr(settings, "set_recursive", lambda _on: None)
+    w, calls = _toggle_window(recursive=False)
+
+    AXPlayerWindow.set_recursive(w, True)
+
+    assert w._recursive is True
+    assert calls, "the folder was never re-listed"
+    assert calls[0][0] == r"C:\V"
+
+
+def test_toggling_while_playing_does_not_restart_the_video(monkeypatch):
+    """Same rule set_sort_mode follows: mpv's only way to take a new playlist
+    is loadlist replace, which restarts playback from the top. Re-listing the
+    sidebar is not worth interrupting the video for."""
+    monkeypatch.setattr(settings, "set_recursive", lambda _on: None)
+    w, calls = _toggle_window(recursive=False, current=Path(r"C:\V\ep3.mkv"))
+
+    AXPlayerWindow.set_recursive(w, True)
+
+    assert calls[0][1]["reload_player"] is False
+
+
+def test_setting_it_to_what_it_already_is_does_nothing(monkeypatch):
+    monkeypatch.setattr(settings, "set_recursive", lambda _on: None)
+    w, calls = _toggle_window(recursive=True)
+
+    AXPlayerWindow.set_recursive(w, True)
+
+    assert calls == [], "a no-op toggle rescanned the whole folder"
+
+
+def test_with_no_folder_open_it_only_remembers_the_setting(monkeypatch):
+    saved = []
+    monkeypatch.setattr(settings, "set_recursive", saved.append)
+    w, calls = _toggle_window(recursive=False, folder=None)
+
+    AXPlayerWindow.set_recursive(w, True)
+
+    assert saved == [True]
+    assert calls == [], "there is no folder to re-list"

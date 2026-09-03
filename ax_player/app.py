@@ -573,8 +573,25 @@ class AXPlayerWindow(QWidget):
         ]
 
     def set_recursive(self, on: bool) -> None:
+        if on == self._recursive:
+            return
         self._recursive = on
         settings.set_recursive(on)
+        if self._folder is not None:
+            # Ticking 含子資料夾 used to set the flag and stop there, so the
+            # list did not change until the next F5 or reopen -- the control
+            # looked broken. Sidebar.restore_state already blocks its signals
+            # "to avoid immediately triggering a rescan of a folder that isn't
+            # open yet", which is only worth doing if a real toggle rescans;
+            # the code disagreed with its own note.
+            #
+            # reload_player mirrors set_sort_mode: re-listing must not restart
+            # what is playing. mpv keeps the old playlist, and a click on a
+            # newly-listed file misses it, which play() already self-heals by
+            # reopening the folder.
+            self.open_folder(
+                self._folder, select=self._current, reload_player=self._current is None
+            )
 
     def set_sort_mode(self, mode: str) -> None:
         if mode == self._sort_mode:
