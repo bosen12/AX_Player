@@ -1633,3 +1633,40 @@ AX Player 有 `test_dimmed_text_stays_readable`,而當初寫那個測試就抓�
 那五個裡沒有一個是「少寫了一行」,全部是「**有那一行,而那一行的語意是錯的**」——`stop()` 不是屏障、`restore_hwdec` 把被拒絕當成成功、讀不到的 `frame-drop-count` 當成 `0.0`。**敘述刪除永遠找不到這一類**,因為刪掉一行錯的程式碼一樣會讓測試紅。
 
 **一句話收尾這幾輪的掃描:擊殺率量的是「測試盯得多緊」,不是「程式碼有多對」。兩者都要,而且要用不同的方法去拿。**
+
+### 9.33 09-04:FM 剩下的模組——54%,而其中一個不是「測不了」
+
+`vs_script` / `mpv_detect` / `runtime` / `gpu` / `config` / `api` / `single` / `log` / `engine_cache` / `mpv_ipc` 一起掃:**360 個抓到、308 個活著(54%)**。
+
+跟 `inject.py` / `watcher.py` 的 100% 差很多,但活體的分布說明了原因:
+
+| 模組 | 活體 | 是什麼 |
+|---|---|---|
+| `mpv_ipc.py` | 92 | **win32 具名管道路徑**——測試用的是 socket 形狀的假物件 |
+| `mpv_detect.py` | 56 | psutil 行程列舉、`list_win_pipes` |
+| `gpu.py` | 45 | 顯示卡驅動登錄檔 |
+| `single.py` | 22 | `ctypes` 的 mutex |
+| **`api.py`** | **23** | **純 Python,而且是唯一的對外表面** |
+
+前四類跟 AX 的繪圖程式碼同一個判斷:**沒有真東西就測不了**,補不掉也不該硬補。
+
+#### `api.py` 的 23 個是另一回事
+
+它是 CLAUDE.md 點名的 security boundary,也是網頁介面唯一碰得到的表面——而活著的**正好是整個表面**:`set_enabled` / `set_profile` / `set_model` / `set_autostart` / `start_setup` / `hide` / `quit` / `open_engine_cache` 的方法主體,以及每一個 `return self.get_state()`。
+
+`test_bridge.py` 的六個測試蓋的是 `set_backend` 的**驗證**和 `clear_engine_cache` 的**回報**——**沒有一個檢查那些方法有沒有真的到達 engine。**
+
+**被掏空的 setter 是一個「會動但什麼都沒做」的控制項**:chip 翻過去,900ms 後的輪詢把舊值讀回來,唯一的症狀是一個切不住的開關。而 `hide` / `quit` 掏空的話,視窗的關閉鈕和托盤的「結束」都會變成沒有反應。
+
+新增 `tests/test_bridge_routing.py`。八個方法逐一掏空,**全部 CAUGHT**。有副作用的兩個(寫 autostart、`os.startfile`)都攔下來,測試不會真的動到登錄檔或開資料夾。
+
+#### 掃描到此結束,以及它留下的判斷方法
+
+兩個 repo 的每個模組都掃過三種突變了。**最後一句總結不是數字,是分類法**:
+
+> 一個活著的突變,先問它屬於哪一類——
+> **(a) 沒有真東西就測不了**(繪圖、win32、登錄檔、行程列舉)→ 不動,記下來;
+> **(b) 只在測試造不出的錯誤條件下才看得出來**(`except OSError: pass`)→ 看那件事有沒有真的發生過;
+> **(c) 純邏輯、而且有使用者看得見的後果** → 補。
+>
+> 這幾輪動的每一個都是 (c),而 (a) 和 (b) 加起來是活體的絕大多數。**先分類再決定,不要看比例做事。**
