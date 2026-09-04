@@ -1786,3 +1786,37 @@ AX 只有最鈍的那一半(`app_data_dir()` 看起來像不像暫存路徑)。*
 #### 一個操作上的注意
 
 整輪突變**沒有把 `APPDATA` / `LOCALAPPDATA` 指向真的目錄**:`roaming_dir`、`engine_cache_dir`、`thumbnail_cache_dir` 都會 `mkdir`,而 `_PruneCacheJob` 會在裡面刪東西,何況這台機器上 Fluid Motion 正在跑。鈍檢查那一條改用「真實形狀但無害」的 `build/` 底下暫用目錄驗證——**要測「保護失效會怎樣」,不必真的讓它失效。**
+
+### 9.37 09-04:拿 §9.35 的方法去審既有的守衛
+
+前面找到的五個「docstring 說 A、fixture 做 B」都是撞到的。這一輪把它變成**主動的審查**:對每一條側欄守衛,**把它 docstring 說它擋的東西真的做出來,看那一條測試會不會紅**——不是看有沒有東西紅。
+
+九條逐一還原它們記載的修正:
+
+| 結果 | 條數 |
+|---|---|
+| CAUGHT | 7 |
+| 我的突變寫錯 | 1 |
+| **真的有洞** | **1** |
+
+#### 有洞的那條:守衛站在 bug 底下一層
+
+`test_removing_one_row_keeps_every_other_rows_thumbnail` 的 docstring 說:「Removal used to rebuild the whole list, which dropped every loaded pixmap」。
+
+而那個 rebuild 在 **`AXPlayerWindow.remove_from_playlist`**,它的註解到現在還寫著「Not set_items(): ...dropped every loaded thumbnail... See Sidebar.remove_rows」。**但測試呼叫的是 `sidebar.remove_rows()`,比 bug 低一層。**
+
+實測:把 `set_items` 放回 `remove_from_playlist`,**133 個測試全綠**。
+
+補了一條站在正確層級的:驅動視窗的方法,檢查註解承諾的三件事——縮圖、搜尋文字、選取狀態都要撐過一次移除。放回 `set_items` → **CAUGHT**。
+
+**這是第六個實例,而它的形狀跟前五個都不同**:前五個是 fixture 沒有造出 docstring 說的條件;這一個的 fixture 是對的,**入口點選錯了層級**。修好的地方在上層,守衛卻裝在下層——兩者都正確,但中間那段沒有人看著。
+
+#### 另一條 SURVIVED 是我的錯,一併記下
+
+`test_right_clicking_blank_space_still_opens_nothing` **自己就把 `_pointer_is_over_rows` monkeypatch 掉了**,所以我去改那個函式當然沒有反應。它測的是「給定指標在 viewport 內時 `_menu_target` 的閘門」,而它確實測到了。**守衛沒問題,是突變無效。**
+
+**這個 loop 第四次踩到「無效的突變看起來就像守衛失效」**(§9.18 錨點、§9.21 hex 字串、§9.27 改錯位置)。這次的新變體是:**測試自己 monkeypatch 掉的東西,不能拿來當突變目標。** 選突變點之前要先看測試把什麼換掉了。
+
+#### 這個審查方法值得留著
+
+它比掃描便宜(九條跑完不到十秒),而且問的是掃描問不到的問題:**掃描問「有沒有東西紅」,這個問「該紅的那一條有沒有紅」。** 一條被別人順手蓋住的守衛,在掃描裡是 CAUGHT,在這裡是 SURVIVED——而後者才是它自己該負的責任。
