@@ -1914,3 +1914,40 @@ AX 只有最鈍的那一半(`app_data_dir()` 看起來像不像暫存路徑)。*
 3. 那個降級的樣子,跟**正常的空狀態**長得一樣嗎?
 
 三個都是「是」,就值得從其中一邊推導出清單去釘另一邊。這兩個邊界三題全中。
+
+### 9.41 09-04:第三個三題全中的邊界 —— 寫給 mpv 的屬性名稱
+
+拿 §9.40 那三個問題去掃,還沒守衛的最大一個是**屬性名稱字串**:字串連起來、寫錯不會丟例外(`_prop` 全捕捉、`_get` 有 `IpcError` 守衛)、而降級的樣子跟「值真的取不到」一模一樣。
+
+**而且它有前科**,就寫在 `inject.py` 裡:
+
+> mpv's property is estimated-vf-fps. The name used here until now, estimated-vfps, does not exist, so `_get`'s IpcError guard swallowed the "property not found" reply and returned None every single time — the fps readout has been silently falling back to container-fps.
+
+#### 先量:32 個名稱,0 個錯
+
+兩個 repo 一共 32 個屬性名稱,拿去問一台真的 mpv(v0.41.0-920)。**全部存在。**
+
+**關鍵在 mpv 自己分得出兩種答案**,這才讓這件事可查:
+
+```
+property not found    -> 名字寫錯了
+property unavailable  -> 名字是對的,只是現在沒有值(什麼都沒播)
+```
+
+沒有這個區分,一個 idle 的 mpv 對「對的名字」和「錯的名字」都答不出值,就查不了。
+
+#### AX 加守衛,FM 不加
+
+**AX**:名稱用 `ast` 從 `player_widget.py` 抽出來(不是寫死清單),開一台 idle mpv 一次問完。`mpv.exe` 是 gitignore 的,所以沒有它就 `skip`。**實測整個檔案 0.4 秒**——比預期便宜,因為 `--no-config --idle --vo=null --ao=null` 的 mpv 起得很快。
+
+突變:把 `hwdec_current` 打錯 → CAUGHT;另外加一個全新的假名稱 → CAUGHT(**只有第二條紅**,證明它自己站得住)。
+
+**FM 不加**,理由是它的測試守則明寫「用 fakes,不碰真 mpv、不需要 GPU」。而硬塞一份手寫的名稱清單當絆線,正是 §9.17 說的那種會過時的東西——**一份只能靠人維護的清單,價值是「讓人停下來」,不是「證明是對的」**,而這裡已經有更好的東西:真的去問 mpv。
+
+**FM 那 18 個名稱這一輪驗過了。** 重驗的方法:起一台 `--idle` 的 mpv,對每個名字送 `get_property`,看回的是 `property not found` 還是 `property unavailable`。
+
+#### 一件差點漏掉的事
+
+第一次跑那個新測試是「2 passed in 0.40s」,而**我不相信那個數字**——spawn 一台 mpv 再問 14 個屬性不該這麼快。所以先注入一個錯字去驗它有沒有真的在做事,結果是 CAUGHT,速度只是真的快。
+
+**如果那時候直接相信綠燈,我就會留下一個可能什麼都沒做的測試。** 這跟 §9.39 的「紅的是我以為的那一條嗎」是同一條規矩的另一面:**綠得太快也要問一次。**
