@@ -418,3 +418,33 @@ def test_removing_from_the_playlist_keeps_the_other_rows_intact(sidebar):
     )
     assert sidebar._search.text() == "ep", "the search box was cleared"
     assert sidebar._rows[PATHS[2]].isSelected(), "the selection was lost"
+
+
+def test_the_context_menu_path_still_claims_the_row_it_opened_on(sidebar):
+    """The check above calls claim_selection_for_menu directly, so it pins the
+    helper -- not that _show_row_menu still calls it.
+
+    That is HANDOFF §9.39's shape: the helper was split out of _show_row_menu
+    *for* testability, and testing only the helper leaves the split itself
+    unguarded. A mutation sweep over this loop's own changes found the call
+    site was the survivor, one layer above where the test stood.
+
+    _show_row_menu ends at QMenu.exec, which cannot be stubbed from Python.
+    build_row_menu is a method, though, so replacing it on the instance lets
+    the whole path run without a modal menu appearing.
+    """
+    shown = []
+    sidebar.build_row_menu = lambda paths: types.SimpleNamespace(
+        exec=lambda _global_pos: shown.append(list(paths))
+    )
+    sidebar._rows[PATHS[0]].setSelected(True)
+    sidebar._rows[PATHS[1]].setSelected(True)
+    target = sidebar._rows[PATHS[2]]
+    assert not target.isSelected()
+
+    sidebar._show_row_menu(sidebar._list.visualItemRect(target).center())
+
+    assert shown == [[PATHS[2]]], (
+        f"the menu was built for {shown}, not the row it was opened on"
+    )
+    assert sidebar._selected_paths() == [PATHS[2]]
