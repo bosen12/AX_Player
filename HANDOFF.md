@@ -1751,3 +1751,38 @@ C 那種 framing 的 body **在連線結束時結束**,所以「被切斷」和�
 拆成兩個測試,理由寫在新的那個 docstring 裡。**這是這個 loop 第四次遇到「測試的安排跟它自己說的意圖不一樣」**(前三個:contact sheet 那個沒呼叫受測函式的、`build.bat` 讀錯 repo 的、LRU 那個目錄順序跟存取順序一致的)。
 
 四個共同的形狀:**docstring 說的是意圖,fixture 決定的是實際測到什麼,而沒有人把兩者對照過。** 對照的方法就是突變——把 docstring 說要擋的東西真的做出來,看它會不會紅。
+
+### 9.36 09-04:守衛測試隔離的東西,自己沒有守衛
+
+兩個 repo 的 CLAUDE.md 都寫著同一件事:conftest 的重導向擋住的意外**已經發生過**(AX:「prunes and rewrites the real user's thumbnail cache」;FM:「a test's tmp_path ended up written into the live mpv_root, breaking the app until someone noticed」)。
+
+AX 只有最鈍的那一半(`app_data_dir()` 看起來像不像暫存路徑)。**FM 什麼都沒有。**
+
+而那個鈍檢查擋不住 conftest 自己花最多篇幅在防的東西:**快取**。三個模組全域(`debug_log._log_path`、`settings._store`、`resume._cache`)各自把路徑解析一次就留著,所以 conftest 逐一重設。**少一個重設、或多一個新的快取**,結果是先跑的那個測試替其餘一百多個釘死目錄——而路徑「看起來像暫存」照樣成立。
+
+#### 兩邊各加一個 `tests/test_isolation.py`
+
+問的是鈍檢查問不到的三件事:
+
+1. **每個落在 `%APPDATA%` / `%LOCALAPPDATA%` 底下的路徑輔助函式,都必須跟著環境變數移動。** 這條是**自我校準**的:read-only 的位置(`ui_dir`、`project_root`、`lru_cache` 過的 mpv root)本來就不在那底下,規則自己把它們排除——**不必手寫「哪些該檢查」的名單**,而那正是 §9.17 說的那種會過時的東西。
+2. 測試期間被填充的快取,必須落在這個測試自己的目錄裡。
+3. (AX)conftest 是否仍然重設了套件裡**每一個**模組級快取——用 `ast` 從原始碼推導。
+
+| 突變 | 結果 |
+|---|---|
+| 路徑輔助函式被 `lru_cache` 起來 | **CAUGHT** |
+| conftest 少一個重設 | **CAUGHT**(靠第 3 條) |
+| 重導向指到非暫存目錄 | **CAUGHT** |
+| (FM)`config.json` 跑出重導向目錄 | **CAUGHT** |
+
+#### 第 3 條是被突變逼出來的
+
+第 2 條原本的 docstring 宣稱它涵蓋了 conftest 的重設。**它沒有。** 把 `debug_log._log_path` 的重設拿掉,它照樣綠——單獨跑那個測試時它本來就是第一個寫 log 的,快取本來就是空的。
+
+**外洩只在同一個 session 跨測試時才看得見,而依賴執行順序的測試比它要補的洞更糟。** 所以 docstring 改成只宣稱它真的驗證的事(理由留在原處),另外加第 3 條從原始碼推導覆蓋率。
+
+**這是第五次「docstring 說的和 fixture 做的不一樣」,而這次是我自己寫的**,在寫完後一分鐘內被突變抓到。§9.35 說對照的方法就是突變——這一輪是那句話用在自己身上。
+
+#### 一個操作上的注意
+
+整輪突變**沒有把 `APPDATA` / `LOCALAPPDATA` 指向真的目錄**:`roaming_dir`、`engine_cache_dir`、`thumbnail_cache_dir` 都會 `mkdir`,而 `_PruneCacheJob` 會在裡面刪東西,何況這台機器上 Fluid Motion 正在跑。鈍檢查那一條改用「真實形狀但無害」的 `build/` 底下暫用目錄驗證——**要測「保護失效會怎樣」,不必真的讓它失效。**
