@@ -2256,3 +2256,46 @@ with onerror=                  : found 3 of 6, 1 error(s) reported
 - `cache.py` 的 `_drop_stale_scratch`:走的是自己的暫存目錄,每一步本來就各自 `except OSError: pass`,吞掉的後果是暫存檔多留一輪、下次啟動再刪。
 - FM 的 `engine_cache.rglob`:自己的目錄,後果是一個尺寸讀數。
 - **FM 的 mpv 列舉本來就 fail-safe。** 掃了 FM 65 個單語句的靜默 `except`,唯一同類的是 `iter_mpv_processes` 的 `except (psutil.Error, ...): continue`——一個真的 mpv 掉在那裡就會「靜靜不出現」。但查下去:`proc.exe()` 有內層處理(失敗只是 `exe = ""`),`_is_helper_mpv` 自己 `return False`,`proc.info` 是已經取好的資料。**沒有東西還會丟。** 早幾輪把內層處理放對位置的人已經擋住了。
+
+### 9.48 09-05:關閉時的子行程,兩個 repo 兩種答案 ★
+
+問一個沒問過的:**這兩個 app 生出來的子行程,在關閉時會怎樣?**
+
+#### AX:等待一直都在,只是躲在一個已經隱藏的視窗後面
+
+`_emit_safely` 的 docstring 寫著 drain pool 被否決,理由是 `waitForDone()`「would trade a log line for a 30-second freeze on exit」。**量了,那是錯的。**
+
+`QThreadPool` 被銷毀時就會 drain,所以行程比視窗多活的時間等於還在跑的 grab 剩多久:
+
+```
+沒有 grab 在飛          2.21 s
+一個還剩 6 秒的 grab    8.36 s
+一個卡進 GRAB_TIMEOUT   20.24 s
+```
+
+而且**跟 parent 無關**——把 pool 改成沒有 parent 也是 20.24 s。
+
+現在這個順序真正買到的是**那段等待花在哪**:`closeEvent` 先 `hide()` 再強制重繪,所以行程在一個已經消失的視窗後面死掉,而不是卡在凍住的視窗前面。這才是值得守的,而它一個測試都沒有——補上了(用一個繼承 `AXPlayerWindow` 但跳過 `__init__` 的 stub,真的 `__init__` 會建 libmpv)。四個重排突變全 CAUGHT。
+
+§5.6 又一次:**觀察對、貼在上面的解釋錯、而錯的解釋寫進了註解。**
+
+#### FM:同一個問題,但答案是真的壞掉 ★
+
+`quit_app` 以 `os._exit(0)` 結束——它必須,不然 pywebview + pystray 會留下無頭行程。但 `os._exit` 不 join 執行緒、不跑 finally,而 Windows 子行程不跟父行程死。
+
+`engine.stop()` 摸得到 tick 執行緒和 IPC,**摸不到 bootstrap 執行緒**——那是 daemon,卡在 `run_hidden` 裡等 7z 解壓 2.6 GB。
+
+在真正的程式路徑上重現:**離開之後子行程還活著,父行程已經不在。**
+
+浪費的工是比較小的那一半。`install_runtime` 的「一次只能一個」旗標是 **per-process** 的,而它自己的註解仔細推理過「a second 3.5 GB download into the same cache」會「extracts it over the first」——**那個旗標看不到上一輪留下的孤兒**,所以下次啟動會朝著孤兒正在寫的目錄再開一次解壓。同一個危險,從一扇沒查過的門進來。
+
+`run_hidden` 原本是 `subprocess.run`,而 `run()` 把 Popen 留給自己。改成 `run()` 自己的函式體並登記 handle,`quit_app` 在 `os._exit` 前收掉。修好之後同一個重現:**孤兒 0 個**。
+
+#### 兩個 SURVIVED,一個補一個不補
+
+- **`quit_app` 不再收 → 第一次 SURVIVED。** 我釘了 `terminate_children`,沒釘「離開時會呼叫它」。**§9.39 第三次。** `quit_app` 是 `main()` 裡的 closure、結尾是 `os._exit`,呼叫不到,所以改用 `ast` 從原始碼確認那個呼叫在、且在 `os._exit` 之前。補完 CAUGHT。
+- **`if child.poll() is None` → `if True` 仍然 SURVIVED,不補。** 那只讓一個日誌數字多算,`Popen.kill()` 對已結束的行程本來就是 no-op——語意近乎等價,補測試等於測日誌。
+
+#### 沒動的
+
+AX 被**強制**結束(工作管理員 / 當掉)而剛好有 grab 卡住時,子行程會變孤兒——實測 3 個,正常關閉是 0 個。要修得靠 Windows Job Object,而觸發需要「被強殺」和「grab 卡死」同時成立,一般的 grab 半秒就結束。FM 那邊是**每一次正常離開**都會發生,所以兩者不同級。
