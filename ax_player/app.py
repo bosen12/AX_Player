@@ -97,10 +97,24 @@ def _emit_safely(signal, *args) -> None:
 
     Swallowing it is the whole fix: the result is a cached file on disk that
     the next launch picks up anyway, and the only thing lost is a repaint of
-    a window that is already gone. Draining the pool instead was measured and
-    rejected -- waitForDone() blocks the close for as long as the slowest job
-    runs, which for a stalled grab is GRAB_TIMEOUT, so it would trade a log
-    line for a 30-second freeze on exit.
+    a window that is already gone.
+
+    This used to add that draining the pool was rejected because waitForDone()
+    "would trade a log line for a 30-second freeze on exit". Measured, and
+    that is wrong: the wait happens either way. A QThreadPool drains when it
+    is destroyed, so the process outlives the window by however long the
+    running grabs take -- 2.2s with none in flight, 8.4s with one that had 6s
+    left, 20.2s with one stalled into GRAB_TIMEOUT. Reparenting the pool
+    changes nothing; both shapes measured 20.24s.
+
+    What the current order actually buys is *where* that wait is spent.
+    closeEvent hides the window and forces the repaint through before any of
+    it, so the process finishes dying behind a window that is already gone
+    rather than in front of a frozen one. That is worth keeping and is what
+    test_closing_hides_the_window_before_tearing_mpv_down pins; calling
+    waitForDone() explicitly would not add a freeze, it would just make the
+    existing one explicit. §5.6 again: the observation was right and the
+    explanation attached to it was not.
     """
     try:
         signal.emit(*args)

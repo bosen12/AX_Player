@@ -2,6 +2,8 @@
 import types
 from pathlib import Path
 
+from PySide6.QtGui import QCloseEvent
+
 from ax_player import resume, settings
 from ax_player.app import (
     THUMB_POOL_MAX,
@@ -664,4 +666,64 @@ def test_a_subfolder_the_scan_cannot_open_is_reported(tmp_path, monkeypatch):
     assert "season 2" in text, (
         "the unreadable subtree was dropped with no trace; a bug report about "
         "missing episodes would have nothing to go on"
+    )
+
+
+def test_closing_hides_the_window_before_tearing_mpv_down(qapp, monkeypatch, tmp_path):
+    """The order in closeEvent is the whole reason a close feels instant.
+
+    Tearing mpv down takes ~0.5s (GPU context release plus mpv's watch-later
+    write), and Qt only hides the window after closeEvent returns -- so doing
+    it in the obvious order leaves the window on screen, frozen, for that
+    long. hide() plus a forced repaint first is what moves it behind a window
+    that is already gone.
+
+    Measured while writing this: the process itself does *not* leave when the
+    window does. Exit waits for every frame grab already on a pool thread --
+    2.2s with none running, 8.4s with one that had 6s left, 20.2s with one
+    stalled into GRAB_TIMEOUT. So the wait _emit_safely's docstring describes
+    avoiding is not avoided; it is merely spent behind a hidden window, which
+    is the part worth protecting and the part nothing was checking.
+    """
+    from PySide6.QtWidgets import QWidget
+
+    from ax_player import app as app_mod
+    from ax_player import settings as settings_mod
+
+    order = []
+
+    class _Stub(app_mod.AXPlayerWindow):
+        # Skips AXPlayerWindow.__init__, which builds a real libmpv player.
+        def __init__(self):
+            QWidget.__init__(self)
+            self.sidebar = types.SimpleNamespace(unwatched_only=lambda: False)
+            self.player = types.SimpleNamespace(
+                shutdown=lambda: order.append("player.shutdown")
+            )
+            self._thumb_pool = types.SimpleNamespace(
+                clear=lambda: order.append("thumb_pool.clear")
+            )
+            self._scan_pool = types.SimpleNamespace(clear=lambda: None)
+
+        def hide(self):
+            order.append("hide")
+            super().hide()
+
+    monkeypatch.setattr(settings_mod, "set_geometry", lambda _g: None)
+    monkeypatch.setattr(settings_mod, "set_unwatched_only", lambda _v: None)
+    monkeypatch.setattr(settings_mod, "flush", lambda: None)
+
+    window = _Stub()
+    try:
+        window.closeEvent(QCloseEvent())
+    finally:
+        window.deleteLater()
+
+    assert "hide" in order, "the window was never hidden by closeEvent"
+    assert order.index("hide") < order.index("player.shutdown"), (
+        f"mpv is torn down before the window is hidden ({order}) -- that is "
+        "~0.5s of a frozen window still on screen"
+    )
+    assert order.index("thumb_pool.clear") < order.index("player.shutdown"), (
+        "queued grabs are dropped after the teardown they were meant to skip"
     )
