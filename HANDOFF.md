@@ -2204,3 +2204,55 @@ _draw_clamped_text 單獨    0.040 ms   (16%)
 **測試順序相依**:兩個 repo 38 個測試檔**逐一單獨跑,全部通過**。這一輪加了 process 級全域快取(`gpu._VENDORS`),那正是會製造順序相依的東西,所以查了。
 
 **FM sweep 剩下的 survivor 逐條看完,沒有第二個真發現**:多數是錯誤路徑的 `log()`(刪掉不紅,也不值得釘)、`start_bootstrap` 的安裝執行緒(要真的下載 3.5 GB 才走得到)。最有嫌疑的 `watcher.py:879` 的 `_engine_growing_until = 0.0`,查下去最壞情況是切到 ncnn 之後標籤停留 `ENGINE_GROWTH_GRACE = 3.0` 秒。不動。
+
+### 9.47 09-05:第五個三題全中的邊界 —— 讀不到的子資料夾 ★
+
+挑沒掃過的角度:`MAX_PATH`、長路徑、unicode 在 HANDOFF 裡**零命中**(`grep -i UNC` 那 12 筆是 `function` 的誤配)。而這個 app 的工作就是指著動畫資料夾。
+
+#### 先量,而且量出來是「沒問題」
+
+一個 406 字元的路徑,從原始碼跑:
+
+```
+LongPathsEnabled (registry)  True      ← 這台機器
+os.walk 找到                  1 個,406 字元,完全相符
+cache_key                     40 字元的 sha1(路徑長度不影響快取檔名)
+抓圖的暫存目錄                100 字元
+resume 來回                   無損
+```
+
+**打包這一側也沒有缺陷**,而且是從 `RT_MANIFEST` 資源取出來確認的,不是 grep 字串——onefile 包裡有 `python3x.dll`,它自己的 manifest 會讓字串比對永遠是 True:
+
+```
+python.exe        manifest 1349B   longPathAware=True
+AXPlayer.exe      manifest 1293B   longPathAware=True   (onefile 與 onedir)
+FluidMotion.exe   manifest 1293B   longPathAware=True
+```
+
+(寫那支探針時 `FreeLibrary` 沒設 `argtypes` 就炸了 —— 正是 CLAUDE.md 記的 `SetWindowPos` 那個 32-bit handle 陷阱,換一個函式而已。)
+
+#### 真正的洞在旁邊
+
+`LongPathsEnabled` 這台是 True,**但 Windows 預設是 0**。那時候會怎樣?
+
+`_ScanJob._scan` 呼叫 `os.walk(self._folder)` **沒有傳 `onerror`**,而 Python 的預設是「忽略錯誤、整個目錄跳過」。`run()` 的 `except OSError` 幫不上忙——**os.walk 自己從來不丟**。
+
+實測(六個檔案,用 icacls 拒掉一個子資料夾):
+
+```
+as the app does it (no onerror): found 3 of 6 -- no exception
+with onerror=                  : found 3 of 6, 1 error(s) reported
+   PermissionError: ...\walkdemo\locked
+```
+
+側欄列出一個少了一個子樹的資料夾,而那跟「本來就只有這些集數」**長得一模一樣**。三題全中。
+
+觸發條件裡最重要的不是權限,是**路徑長度**——超過 260 打不開,除非機器開了長路徑,而那預設是關的。其次是掃到一半閃斷的網路磁碟、掃描途中被刪掉的目錄。
+
+補 `onerror` **救不回那些檔案**(它們真的讀不到),改變的是那個缺漏會留下痕跡。不然一份「集數少了」的回報無從查起。四個突變全 CAUGHT。
+
+#### 同形狀、查過不動的三個
+
+- `cache.py` 的 `_drop_stale_scratch`:走的是自己的暫存目錄,每一步本來就各自 `except OSError: pass`,吞掉的後果是暫存檔多留一輪、下次啟動再刪。
+- FM 的 `engine_cache.rglob`:自己的目錄,後果是一個尺寸讀數。
+- **FM 的 mpv 列舉本來就 fail-safe。** 掃了 FM 65 個單語句的靜默 `except`,唯一同類的是 `iter_mpv_processes` 的 `except (psutil.Error, ...): continue`——一個真的 mpv 掉在那裡就會「靜靜不出現」。但查下去:`proc.exe()` 有內層處理(失敗只是 `exe = ""`),`_is_helper_mpv` 自己 `return False`,`proc.info` 是已經取好的資料。**沒有東西還會丟。** 早幾輪把內層處理放對位置的人已經擋住了。
