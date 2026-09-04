@@ -2099,3 +2099,56 @@ console:     TypeError: Cannot read properties of null
 **「0 個」和「全過」都要當成待證的數字。** 這一輪兩次靠這條救回來:FM 的 30 個 id 差點被記成 0,而 §9.41 那個 0.4 秒的測試差點被當成有在做事。
 
 `.claude/launch.json` 多了一個 `fm-ui` 設定(port 8733,指向 `fluid_motion/ui`),留著讓這個驗證可以重跑。那個檔案是 gitignore 的,機器本地。
+
+### 9.44 09-04:回頭審這個 loop 自己的 113 個 commit ★
+
+方法不是重讀 commit message,是**對「這一輪改動過的每一行生產碼」做語句刪除突變**——活下來的就是我加了而沒有東西釘住的。
+
+```
+AX  104 個有效突變   63 caught / 33 survived / 8 無效
+FM  192 個有效突變  139 caught / 41 survived / 12 無效
+```
+
+#### 工具第一次寫錯了,而錯的方式正是它要找的東西
+
+第一版用正規表示式挑「看起來像語句」的行,跑出 842 個目標。看了頭幾筆才發現它在改**多行 docstring 的內文**——那換成 `pass` 仍然是合法字串,程式照跑,測試照過,於是報成 SURVIVED。
+
+**546/842 是雜訊。** 改用 `ast` 只挑單行的簡單語句之後剩 296 個。這是這個 loop 第七次踩到「無效突變被當成結果」。
+
+#### 找到的退化:我把 nvidia-smi 放回了 900ms 的輪詢路徑 ★
+
+`Engine._backend()` 是這一輪加的(base 完全沒有這個方法)。它呼叫 `available_vendors()` → `gpu.snapshot()` → nvidia-smi,1.5 秒 TTL。而 `state()` 每 900ms 跑一次,**每隔一次就錯過那個 TTL**。
+
+```
+nvidia-smi 每次 spawn     46.7 ms(中位數,12 次)
+900ms 輪詢 vs 1.5s TTL    每 1.80 秒一次
+成本                      1,557 ms / 分鐘,只要 app 開著
+對照:同一輪刻意跳過的 engine cache 掃描  382 ms / 分鐘
+```
+
+而 `HOUSEKEEPING_ACTIVE/IDLE` 存在的理由就寫在它們上面三行:「spawning nvidia-smi every 1.5s (its own cache TTL), forever」。**我從一條那兩個常數管不到的路徑,把它原封不動地帶了回來。** `_backend()` 自己的註解還寫著「this runs several times per tick」——我當時節流了**日誌**,沒節流那個**查詢**。
+
+**第一版修法是錯的。** 把 `_backend()` 照 `settings.backend` 記憶化 → 四條測試紅,而它們是對的:`test_a_backend_change_is_recorded_with_what_caused_it` 的 docstring 明寫「設定可以停在 auto 而答案會動」。撤回。
+
+正確的位置是 `available_vendors()` 自己:它問的問題跟 `detect_adapters()` 已經 process 快取的問題一模一樣,而那個快取的理由就寫著「adapters cannot change while the machine is on」。全 repo 沒有一處傳 `refresh=True`。而且這樣**更安全**——`resolve_backend` 只擋住「偵測回空」,一台有內顯的 NVIDIA 機器只要 nvidia-smi 眨一下眼(TDR、驅動重置),vendors 會變成非空的 `{AMD}` 而解析成 ncnn。
+
+#### 回歸測試差點又是假的
+
+第一版在緊迴圈裡呼叫 `_backend()` 60 次數 spawn,**把快取拿掉它照樣過**——六十次迭代只花微秒,`snapshot()` 自己的 1.5s TTL 從頭蓋到尾。它量的是空氣。加上會前進的假時鐘才測得到。
+
+**「綠了」不等於「測到了」;會動的時間也是待證的前提。**
+
+#### 另一條:守衛又站在抽出來的那一層
+
+`claim_selection_for_menu` 當初就是為了可測試才從 `_show_row_menu` 抽出來的,而測試只測抽出來的函式——**那個「抽」本身沒有守衛**。§9.39 是我在這個 loop 裡自己記下的教訓,然後又犯了一次。
+
+#### 查過、判斷不動的
+
+- **`AXPlayerWindow.__init__` 那 140 行在結構上碰不到**:offscreen 建視窗時 libmpv 丟 `Invalid value for mpv parameter`。`app.py:329` 的 `setMaxThreadCount` 屬於這一類;抽成小函式只會把缺口往下移一層(又是 §9.39)。純函式 `_thumb_pool_size` 本身有 10 條斷言。
+- **多個「單點存活」其實是冗餘不是缺口**:`claim_selection_for_menu` 內部三行彼此重複;`inject.py` 的三個 `refused = True` 也是——**同時拿掉三個 → CAUGHT**,第 25 輪那個修正確實有守。補測試等於測實作細節。
+- **`resume._merge_from_disk` 每次 `_write` 多讀一次檔**:量過 **0.182 ms**(真實資料庫 220 筆 / 24 KB),五秒一次 = 每分鐘 2.2 ms。11,000 筆也才 5.6 ms。**不是效能問題。**
+- **`resume.json.<pid>.tmp` 的孤兒檔**:舊的裸 `.tmp` 每次當機只留一個(下次覆蓋),加了 pid 之後每次留一個新的。但窗口是 5 秒週期裡的 0.2 ms——每次當機約 1/25000。`except OSError` 已經處理掉可捕捉的失敗。真的存在,實務上觀察不到,不動。
+
+#### 這一輪的方法論
+
+**審自己不能靠重讀自己寫的東西。** 我讀 `resume.py` 的 diff 讀得很仔細,什麼也沒找到;真正的退化是突變掃出來的,而且在另一個 repo、另一個檔案。
