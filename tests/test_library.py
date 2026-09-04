@@ -616,3 +616,52 @@ def test_a_hover_outranks_the_background_sweep(tmp_path):
     AXPlayerWindow.request_contact_sheet(w, str(hovered))
 
     assert w.queued == [-1, 0], f"priorities came out as {w.queued}"
+
+
+def test_a_subfolder_the_scan_cannot_open_is_reported(tmp_path, monkeypatch):
+    """os.walk's default is to drop an unreadable directory without a word.
+
+    _scan used to call it that way, and run()'s `except OSError` could not
+    help -- os.walk never raises one. A folder half of which could not be read
+    listed as a folder that simply had fewer episodes, which is exactly what a
+    folder with fewer episodes looks like.
+
+    Demonstrated on a six-file tree with one subfolder denied via icacls:
+    three files listed, nothing raised, nothing logged. The likeliest trigger
+    is not permissions but path length -- over 260 characters fails unless the
+    machine has LongPathsEnabled, which Windows still ships off, and a nested
+    "[SubsPlease] ... (1080p) [Batch]" folder reaches that without trying.
+
+    The files stay unreadable either way. What changes is that the omission
+    leaves a trace.
+    """
+    import os
+
+    from ax_player import debug_log
+
+    readable = tmp_path / "season 1"
+    readable.mkdir()
+    (readable / "ep01.mkv").write_bytes(b"")
+    blocked = tmp_path / "season 2"
+    blocked.mkdir()
+    (blocked / "ep02.mkv").write_bytes(b"")
+
+    # A real OSError travelling os.walk's real code path, rather than a fake
+    # walk: os.walk calls os.scandir, and only this one directory refuses.
+    real_scandir = os.scandir
+
+    def refusing(path=".", *args, **kwargs):
+        if Path(path) == blocked:
+            raise PermissionError(13, "Access is denied", str(blocked))
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", refusing)
+
+    found = _scan(tmp_path, recursive=True)
+
+    assert found == ["ep01.mkv"], "the readable half must still be listed"
+    text = debug_log.path().read_text(encoding="utf-8", errors="replace")
+    assert "season 2" in text, (
+        "the unreadable subtree was dropped with no trace; a bug report about "
+        "missing episodes would have nothing to go on"
+    )

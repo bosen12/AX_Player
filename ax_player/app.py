@@ -201,6 +201,16 @@ def _sort_playlist(paths: list[Path], mode: str) -> list[Path]:
     return sorted(paths, key=lambda p: (-stat_key(p), natural_key(p.name)))
 
 
+def _log_scan_error(error: OSError) -> None:
+    """A directory the recursive scan could not open.
+
+    Module-level so a test can drive it, and so the scan's onerror is a name
+    rather than a lambda -- os.walk's default of dropping the subtree without
+    a word is the behaviour this exists to replace.
+    """
+    debug_log.log(f"folder scan: skipped {error.filename!r} ({error})")
+
+
 class _ScanSignals(QObject):
     # folder path, [str video path], select path ("" for none), reload player
     done = Signal(str, list, str, bool)
@@ -241,10 +251,29 @@ class _ScanJob(QRunnable):
         os.walk also does not follow directory symlinks by default, where
         Path.rglob does -- a junction pointing back up its own tree is a real
         thing on Windows and used to be an unbounded scan.
+
+        onerror is not optional. Without it os.walk's documented default is to
+        ignore the error and skip that directory whole, and run()'s
+        `except OSError` cannot help because os.walk never raises one. The
+        sidebar then lists a folder that is quietly missing a subtree, which
+        looks exactly like a folder that never had it -- demonstrated on a
+        六-file tree with one subfolder denied: three files listed, no error
+        anywhere.
+
+        The likeliest cause is not permissions. A path over 260 characters
+        fails to open unless the machine has LongPathsEnabled set, and
+        Windows still ships that off; an episode folder called
+        "[SubsPlease] ... (1080p) [Batch]" nested under a series and a season
+        gets there without trying. Also: a network share that blinks
+        mid-scan, and a directory deleted while the scan is walking it.
+
+        Nothing here can recover those files -- they genuinely cannot be read.
+        What this buys is that the omission stops being invisible, which is
+        what a bug report needs to be answerable at all.
         """
         found: list[Path] = []
         if self._recursive:
-            for root, _dirs, files in os.walk(self._folder):
+            for root, _dirs, files in os.walk(self._folder, onerror=_log_scan_error):
                 root_path = Path(root)
                 found.extend(root_path / name for name in files if is_video_name(name))
         else:
