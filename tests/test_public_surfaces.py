@@ -103,3 +103,55 @@ def test_the_search_engine_blurb_names_the_right_license():
     assert all(name == _badge_license() for name in named), (
         f"the blurb says {named}, this project is {_badge_license()}"
     )
+
+
+# --- the other way the page drifts: ids ---------------------------------
+#
+# docs/app.js and docs/index.html are joined by bare id strings. app.js grabs
+# six of them up front and then calls lib.addEventListener(...) with no null
+# check, so a renamed id throws and the whole demo -- the page's one piece of
+# interactive content -- silently does nothing. Nobody's install breaks, which
+# is why this sits here at a lower weight than the sibling project's
+# test_dom_contract.py, where the same shape leaves the app unable to start.
+#
+# This file already exists because the published page drifted twice: the
+# version chip sat two releases behind, and the license said MIT for ten days
+# after the relicense. A third drift class in the same hand-edited file is not
+# a hypothetical.
+
+
+def _page_ids() -> set[str]:
+    return set(re.findall(r'\bid="([^"]+)"', _read("docs/index.html")))
+
+
+def _js_lookups() -> set[str]:
+    return set(re.findall(
+        r"""getElementById\(\s*["']([^"']+)["']""", _read("docs/app.js")
+    ))
+
+
+def test_the_id_extraction_finds_both_sides():
+    """Guards the guard: either side coming back empty would make the two
+    checks below pass while comparing nothing."""
+    assert len(_page_ids()) >= 8, sorted(_page_ids())
+    assert len(_js_lookups()) >= 5, sorted(_js_lookups())
+
+
+def test_every_id_the_demo_reaches_for_is_on_the_page():
+    missing = sorted(_js_lookups() - _page_ids())
+    assert not missing, (
+        f"docs/app.js looks up ids the page does not define: {missing}. "
+        "getElementById answers null, and the first unguarded use of one "
+        "throws -- taking the rest of the demo with it, in a console the "
+        "visitor never opens."
+    )
+
+
+def test_every_in_page_link_lands_somewhere():
+    """The skip link, the section rail and the nav all point at #ids. A dead
+    one scrolls nowhere, which looks the same as a link nobody clicked."""
+    page = _read("docs/index.html")
+    targets = set(re.findall(r'href="#([^"]+)"', page))
+    assert len(targets) >= 5, f"only found {sorted(targets)}"
+    dead = sorted(targets - _page_ids())
+    assert not dead, f"these in-page links point at ids that do not exist: {dead}"
