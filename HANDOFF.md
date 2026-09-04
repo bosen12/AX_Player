@@ -1715,3 +1715,39 @@ engine._error          : ''
 **掃描問的是「測試盯得多緊」,這一輪問的是「哪裡還有同一種錯」。** 後者不需要工具,需要的是一份缺陷形狀的清單——而 §9.7 已經把清單寫好了,只是沒有人拿它當搜尋條件用過。
 
 **下一個可以照樣搜的形狀,§9.7 也列了:「讀不到被當成一個值」。** 搜法是在外部讀取上找 `or 0` / `or 0.0` / `or ""` / `or []` 的預設值,再問那個預設值和「真的是零」分不分得開。
+
+### 9.35 09-04:照著上一節指的方向找,在下載器裡找到了
+
+§9.34 指名的形狀:**「讀不到被當成一個值」**。兩個 repo 的預設值全部掃過一遍,大多數是無害的(字串名稱、只拿來顯示的寬高、有 `if total:` 守著的除法)。有一個不是。
+
+**`mpv_fetch._download` 的完整性檢查是 `if expected and received != expected`**,而 `expected` 是 `int(resp.headers.get("Content-Length") or 0)`——**伺服器不回報長度,整個檢查就自己關掉了。**
+
+那個檢查的 docstring 記著它擋的是什麼:「Demonstrated against a server declaring 5 MB and sending 1: no error, 1 MB landed」。它擋得住那個,擋不住沒有宣告長度的。
+
+#### 用真的 socket 量,五種 framing
+
+| | 回應 | 結果(修正前) |
+|---|---|---|
+| A | 宣告長度、body 送一半 | 既有檢查擋下 |
+| B | chunked、串流中途切斷 | `http.client` 自己丟 `IncompleteRead` |
+| **C** | **沒有長度也沒有 chunked** | **接受 5 MB 檔案的 1 MB 並改名上去** |
+| D | 宣告長度、完整 | 正常完成 |
+| E | chunked、正常結束 | 正常完成 |
+
+C 那種 framing 的 body **在連線結束時結束**,所以「被切斷」和「正常收完」從回應本身分不出來。而 `fetch_binaries` 是「檔案存在就跳過」——**那個壞掉的二進位檔永遠不會再抓一次**。
+
+#### 修法用規則,不用猜大小
+
+**HTTP/1.1 規定兩種 framing 至少要有一種**,所以「兩種都沒有」只會發生在 1.0 伺服器或不合規的 1.1 上——不是 GitHub 或 SourceForge,而這三個 URL 都在那兩邊。
+
+**拒絕而不是接受,是因為兩種錯不對稱**:誤拒是一則錯誤訊息加一次重試,誤收是一個永遠不會再抓的壞檔案。(用大小下限去猜會是另一種寫死的假設,而且對 17 MB 和 119 MB 兩種檔案都得挑一個數字。)
+
+#### 又一個 fixture 對不上 docstring 的既有測試
+
+原本有一個 `test_a_server_that_declares_nothing_is_not_second_guessed`,理由寫「chunked 回應沒有 Content-Length,所以檢查必須讓步」。
+
+**對了一半,而錯的那一半正是關鍵。** 它的 fixture 設 `headers = {}`——**連 `Transfer-Encoding` 都沒有**——所以它模擬的根本不是 chunked,而是唯一沒有任何保護的那一種。chunked 本來就不需要那次讓步(`IncompleteRead` 就擋住了),讓步真正放行的是 C。
+
+拆成兩個測試,理由寫在新的那個 docstring 裡。**這是這個 loop 第四次遇到「測試的安排跟它自己說的意圖不一樣」**(前三個:contact sheet 那個沒呼叫受測函式的、`build.bat` 讀錯 repo 的、LRU 那個目錄順序跟存取順序一致的)。
+
+四個共同的形狀:**docstring 說的是意圖,fixture 決定的是實際測到什麼,而沒有人把兩者對照過。** 對照的方法就是突變——把 docstring 說要擋的東西真的做出來,看它會不會紅。
