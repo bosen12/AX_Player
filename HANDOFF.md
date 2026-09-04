@@ -2022,3 +2022,80 @@ onedir 複本 359 檔 vs 359 檔,無殘留舊檔
 ```
 
 最後一條是這次新加的。前面每一步都可能對,而發出去的是別的東西。
+
+### 9.43 09-04:第四個三題全中的邊界 —— JS 抓的 DOM id ★
+
+拿 §9.40 那三題掃還沒碰過的接縫。查了 HANDOFF:`.spec` 的 `datas`、signal emit、`input.conf` 都掃過了,**`getElementById` 零命中**。
+
+#### 先量,而且第一次量錯了
+
+探針掃 `getElementById("...")`,結果:
+
+```
+AX docs : 8 ids, 8/8 found
+FM ui   : 0 ids                    <- 21 KB 的 app.js
+```
+
+**21 KB 的檔案「0 個 id」不合理。** 照 §9.41 那條「綠得太快也要問一次」去挖,FM 用的是本地包裝:
+
+```js
+function $(id) { return document.getElementById(id); }
+```
+
+補上之後是 **30 個**。那個「0 unresolved」本來是空轉的。
+
+補完的結果:AX 8/8、FM 30/30,全部對得上。**現況乾淨,缺的是沒有東西在維持它。**
+
+#### 嚴重度:一開始想錯了,查下去才是真的
+
+第一版判斷是「§9.40 第二三題對 FM 是否」—— 因為 `refresh()` 有 try/catch,會把 TypeError 丟成 toast,看得見。
+
+**但 `bind()` 不在那個保護裡。** 它有 17 個 `$("id").addEventListener(...)`,而呼叫點是:
+
+```js
+document.addEventListener("DOMContentLoaded", () => {
+  bind();                       // 少一個 id 就在這裡 throw
+  render(mock);                 // 不會執行
+  refresh();                    // 不會執行
+  setInterval(refresh, 900);    // 不會執行
+});
+```
+
+順序決定一切:**bind() 排在最前面**,所以連 bind() 最後一個按鈕出事,輪詢都不會被排程。
+
+#### 實測,不是推論
+
+用 `http.server` 起真的頁面(`file://` 不行 —— 預覽窗把本機檔案當靜態快照,外部 script 根本不執行,`typeof $` 是 undefined)。
+
+對照組:6 個 profile 鈕、3 個 model 鈕、GPU 名稱,都由 `render()` 填出來。
+
+只把 `btn-quit` 打錯 —— **bind() 最後碰的那一個**:
+
+```
+profileBtns: 0        render(mock) 沒跑
+modelBtns:   0
+gpu:         "GPU"    靜態佔位字,從來沒被填
+toast:       ""       沒有 toast:它在 refresh() 裡,而 refresh 沒開始
+console:     TypeError: Cannot read properties of null
+             (reading 'addEventListener')  at app.js:524:3
+```
+
+使用者看到:視窗開了、停在靜態骨架、沒有東西輪詢、下面每個控制項都沒綁定。Python 沒事、匣列沒事、`fluid_debug.log` 一個字都沒有。**唯一的痕跡在使用者永遠不會打開的 JS console 裡**,而那跟「還沒接上 mpv」長得一模一樣。
+
+#### 守衛的唯一假設,自己也要釘
+
+大部分查詢是靠比對 `$("...")` 找到的。**如果 `$` 哪天改包 `querySelector`,那些字串的意義就變了,而比對還會繼續通過。** 所以另外釘住 `$` 仍然是 `getElementById` 的包裝 —— 五個突變裡有兩個是打這一點的,都 CAUGHT。
+
+#### AX 也加了,但份量不同
+
+同一種形狀(`app.js:146` 的 `lib.addEventListener` 沒有 null 檢查),但壞的是行銷頁的示範,沒有人的安裝會壞。所以放進既有的 `test_public_surfaces.py`,不自成一檔。
+
+理由是這頁真的會漂:版本號落後過兩個 release、授權對外說了十天的 MIT(§9.42)。**同一個手改檔案的第三種漂移不是假設。** 順手加了頁內連結檢查(skip link / 章節導軌 / 導覽列),死掉一個就是捲到不動,跟「沒有人點過」看起來一樣。
+
+十個突變全 CAUGHT。148 / 306 passed,兩個直譯器皆綠。
+
+#### 這一輪的方法論
+
+**「0 個」和「全過」都要當成待證的數字。** 這一輪兩次靠這條救回來:FM 的 30 個 id 差點被記成 0,而 §9.41 那個 0.4 秒的測試差點被當成有在做事。
+
+`.claude/launch.json` 多了一個 `fm-ui` 設定(port 8733,指向 `fluid_motion/ui`),留著讓這個驗證可以重跑。那個檔案是 gitignore 的,機器本地。
