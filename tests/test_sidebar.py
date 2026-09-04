@@ -382,3 +382,39 @@ def test_right_clicking_an_unselected_row_acts_on_that_row(sidebar):
     assert sidebar._selected_paths() == [PATHS[2]], (
         "the menu would have acted on the old selection"
     )
+
+
+def test_removing_from_the_playlist_keeps_the_other_rows_intact(sidebar):
+    """The same guarantee as the first test in this file, asserted one level up
+    -- where the bug actually was.
+
+    That test calls sidebar.remove_rows() directly, so it pins Sidebar. The
+    rebuild it describes lived in AXPlayerWindow.remove_from_playlist, whose
+    comment still names it: "Not set_items(): rebuilding the list to delete a
+    row from it reset the scroll position, the search box and the selection,
+    and dropped every loaded thumbnail". Measured: putting `set_items` back
+    there left all 133 tests green.
+
+    So this drives the window method and checks what the comment promises --
+    thumbnails, search text and selection all surviving a removal.
+    """
+    window = types.SimpleNamespace(
+        _playlist=[Path(p) for p in PATHS],
+        sidebar=sidebar,
+        player=types.SimpleNamespace(remove_paths=lambda _paths: None),
+        _playlist_items=lambda: _items(),
+    )
+    for path in PATHS:
+        sidebar.set_thumbnail(path, _pixmap())
+    sidebar._search.setText("ep")
+    sidebar._rows[PATHS[2]].setSelected(True)
+
+    AXPlayerWindow.remove_from_playlist(window, [PATHS[0]])
+
+    assert PATHS[0] not in sidebar._rows, "the row was not removed"
+    assert all(_has_thumb(sidebar, p) for p in PATHS[1:]), (
+        "removal dropped the other rows' thumbnails -- and request_thumbnail "
+        "will not regenerate them, so the sidebar stays grey"
+    )
+    assert sidebar._search.text() == "ep", "the search box was cleared"
+    assert sidebar._rows[PATHS[2]].isSelected(), "the selection was lost"
