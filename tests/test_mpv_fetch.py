@@ -200,14 +200,54 @@ def test_a_complete_response_still_lands(monkeypatch, tmp_path):
     assert dest.stat().st_size == 2048
 
 
-def test_a_server_that_declares_nothing_is_not_second_guessed(monkeypatch, tmp_path):
-    """Chunked responses carry no Content-Length. There is nothing to compare
-    against, so the check has to stand down rather than reject everything."""
+def test_a_chunked_response_is_not_second_guessed(monkeypatch, tmp_path):
+    """Chunked responses carry no Content-Length, so there is nothing to
+    compare against and the length check has to stand down.
+
+    Standing down is safe *here specifically*: a chunked stream that is cut
+    mid-body has no terminating zero-chunk, and http.client raises
+    IncompleteRead on its own. Measured against a real socket sending a
+    chunk header and then hanging up: IncompleteRead(1000000 bytes read).
+    """
     resp = _Response(b"x" * 512)
-    resp.headers = {}
+    resp.headers = {"Transfer-Encoding": "chunked"}
     monkeypatch.setattr(mpv_fetch.urllib.request, "urlopen", lambda _url, timeout=None: resp)
 
     dest = tmp_path / "mpv.exe"
     mpv_fetch._download("https://example/x", dest, None)
 
     assert dest.stat().st_size == 512
+
+
+def test_a_response_with_neither_framing_is_refused(monkeypatch, tmp_path):
+    """The version of this test that shipped asserted the opposite, under the
+    heading "a server that declares nothing is not second guessed" and the
+    reason "chunked responses carry no Content-Length".
+
+    Half of that is right and it is the wrong half that mattered. The fixture
+    set `headers = {}` -- no Transfer-Encoding either -- so it was not
+    modelling a chunked response at all. It was modelling the one framing that
+    has no protection: the body ends when the connection does, and a cut is
+    indistinguishable from a clean finish.
+
+    Measured across all three shapes before the fix: declared-length-short was
+    caught, chunked-and-cut raised IncompleteRead, and this one accepted 1 MB
+    of a 5 MB file and renamed it into place -- where fetch_binaries' "skip
+    what exists" means it is never fetched again.
+
+    Refusing is the asymmetric choice on purpose: a false refusal is an error
+    and a retry, a false accept is a permanently corrupt binary. HTTP/1.1
+    requires one of the two framings, so this rejects only a 1.0 server or a
+    malformed 1.1 one -- not GitHub or SourceForge, where all three of these
+    URLs live.
+    """
+    resp = _Response(b"x" * 512)
+    resp.headers = {}
+    monkeypatch.setattr(mpv_fetch.urllib.request, "urlopen", lambda _url, timeout=None: resp)
+
+    dest = tmp_path / "mpv.exe"
+    with pytest.raises(RuntimeError, match="無法驗證"):
+        mpv_fetch._download("https://example/x", dest, None)
+
+    assert not dest.exists(), "an unverifiable body was renamed into place"
+    assert not list(tmp_path.glob("*.part")), "staging file left behind"

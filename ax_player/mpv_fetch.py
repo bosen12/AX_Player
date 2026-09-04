@@ -66,6 +66,7 @@ def _download(url: str, dest: Path, on_progress: Callable[[str], None] | None) -
     try:
         with urllib.request.urlopen(url, timeout=300) as resp, open(partial, "wb") as fh:
             expected = int(resp.headers.get("Content-Length") or 0)
+            chunked = "chunked" in (resp.headers.get("Transfer-Encoding") or "").lower()
             shutil.copyfileobj(resp, fh)
         # copyfileobj stops at EOF, and a connection cut mid-body looks exactly
         # like the end of one -- so a truncated response was renamed onto dest
@@ -75,10 +76,30 @@ def _download(url: str, dest: Path, on_progress: Callable[[str], None] | None) -
         # through a crash, and fetch_binaries' "skip what exists" means the
         # broken binary is never fetched again.
         received = partial.stat().st_size
-        if expected and received != expected:
+        if expected:
+            if received != expected:
+                raise RuntimeError(
+                    f"{dest.name} 下載不完整（收到 {received / 1e6:.1f} MB，"
+                    f"應為 {expected / 1e6:.1f} MB）"
+                )
+        elif not chunked:
+            # No declared length and no chunking: the body ends when the
+            # connection does, and a cut is then indistinguishable from a
+            # clean finish. Measured across the three shapes -- declared
+            # length short: caught here; chunked and cut: http.client raises
+            # IncompleteRead; neither: 1 MB of a 5 MB file was accepted and
+            # renamed into place.
+            #
+            # Refused rather than accepted because the two failures are not
+            # symmetric. A false refusal is an error message and a retry; a
+            # false accept is a corrupt binary that is never fetched again,
+            # because fetch_binaries skips whatever exists. HTTP/1.1 requires
+            # one of the two framings, so this only rejects a 1.0 server or a
+            # malformed 1.1 one -- not GitHub or SourceForge, which is where
+            # all three of these URLs live.
             raise RuntimeError(
-                f"{dest.name} 下載不完整（收到 {received / 1e6:.1f} MB，"
-                f"應為 {expected / 1e6:.1f} MB）"
+                f"{dest.name} 無法驗證下載完整性："
+                "伺服器沒有回報長度,也沒有使用分塊傳輸"
             )
         partial.replace(dest)
     finally:
