@@ -544,3 +544,75 @@ def test_the_pool_never_collapses_to_a_single_worker():
     assert _thumb_pool_size(None) == 2
     assert _thumb_pool_size(1) == 2
     assert _thumb_pool_size(0) == 2
+
+
+# -- the three ways a contact sheet is asked for ---------------------------
+class _SheetWindow:
+    """Enough of AXPlayerWindow for request_contact_sheet."""
+
+    def __init__(self):
+        self._requested_sheets = set()
+        self.queued = []
+        self.shown = []
+        self._sheet_signals = object()
+        self._thumb_pool = types.SimpleNamespace(
+            start=lambda job, priority=0: self.queued.append(priority)
+        )
+        self.sidebar = types.SimpleNamespace(
+            show_contact_sheet=lambda path, pixmap: self.shown.append((path, pixmap))
+        )
+
+
+def _cached_sheet_for(video: Path) -> Path:
+    from ax_player import contact_sheets
+
+    dest = contact_sheets.cached_sheet_path(video)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"x" * 64)
+    return dest
+
+
+def test_a_sheet_already_on_disk_skips_the_thread_pool(tmp_path):
+    """A repeat hover, an eager pre-generation, or a sheet from an earlier
+    session: all three land here, and all three have to feel instant. Paying a
+    thread hop for a file that is already there is the one thing this branch
+    exists to avoid."""
+    video = tmp_path / "ep1.mkv"
+    video.write_bytes(b"x" * 32)
+    _cached_sheet_for(video)
+    w = _SheetWindow()
+
+    AXPlayerWindow.request_contact_sheet(w, str(video))
+
+    assert w.queued == [], "queued a job for a sheet that was already cached"
+    assert [p for p, _ in w.shown] == [str(video)], "the cached sheet was never handed back"
+    assert w._requested_sheets == set(), "a cache hit should not be recorded as in flight"
+
+
+def test_a_sheet_already_being_generated_is_not_queued_twice(tmp_path):
+    """The eager sweep from _on_folder_scanned and a live hover race for the
+    same file, and each queued job is two mpv subprocesses."""
+    video = tmp_path / "ep2.mkv"
+    video.write_bytes(b"x" * 32)
+    w = _SheetWindow()
+
+    AXPlayerWindow.request_contact_sheet(w, str(video), priority=-1)
+    AXPlayerWindow.request_contact_sheet(w, str(video))
+
+    assert w.queued == [-1], f"queued {len(w.queued)} jobs for one file"
+    assert w.shown == [], "showed a sheet that has not been generated yet"
+
+
+def test_a_hover_outranks_the_background_sweep(tmp_path):
+    """_queue_all_contact_sheets queues at -1 so a row the user is actually
+    looking at jumps the line ahead of twelve it has not asked for."""
+    eager = tmp_path / "ep3.mkv"
+    hovered = tmp_path / "ep4.mkv"
+    for f in (eager, hovered):
+        f.write_bytes(b"x" * 32)
+    w = _SheetWindow()
+
+    AXPlayerWindow.request_contact_sheet(w, str(eager), priority=-1)
+    AXPlayerWindow.request_contact_sheet(w, str(hovered))
+
+    assert w.queued == [-1, 0], f"priorities came out as {w.queued}"
