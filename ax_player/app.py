@@ -271,7 +271,7 @@ class _ScanJob(QRunnable):
         `except OSError` cannot help because os.walk never raises one. The
         sidebar then lists a folder that is quietly missing a subtree, which
         looks exactly like a folder that never had it -- demonstrated on a
-        六-file tree with one subfolder denied: three files listed, no error
+        six-file tree with one subfolder denied: three files listed, no error
         anywhere.
 
         The likeliest cause is not permissions. A path over 260 characters
