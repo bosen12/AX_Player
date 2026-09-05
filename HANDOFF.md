@@ -2299,3 +2299,52 @@ with onerror=                  : found 3 of 6, 1 error(s) reported
 #### 沒動的
 
 AX 被**強制**結束(工作管理員 / 當掉)而剛好有 grab 卡住時,子行程會變孤兒——實測 3 個,正常關閉是 0 個。要修得靠 Windows Job Object,而觸發需要「被強殺」和「grab 卡死」同時成立,一般的 grab 半秒就結束。FM 那邊是**每一次正常離開**都會發生,所以兩者不同級。
+
+### 9.49 09-05:審上一輪的修正,它自己的失敗路徑是無聲的 ★
+
+#### 先驗證上一輪那個改寫
+
+`run_hidden` 是 FM **所有子行程的唯一出口**,上一輪把它從 `subprocess.run` 換成 `run()` 自己的函式體,而覆蓋它的測試幾乎全用 fake。拿真的東西比對:
+
+```
+nvidia-smi(gpu.snapshot 用的那條)   MATCH   rc / 型別 / 輸出全同
+nvidia-smi 錯誤參數(rc=255)          MATCH
+400 KB 同時寫兩個管道                 不死鎖,40ms,兩邊都收滿
+非法 UTF-8 位元組                     取代而不是丟例外
+capture_output=False                  rc=0,stdout is None
+```
+
+7z 這台機器沒裝(FM 安裝時才下載),測不到。
+
+#### 然後掃出上一輪自己留的洞
+
+對這一輪改動過的每一行做語句刪除突變:AX 1/1 caught,FM 21 caught / 6 survived。其中一個是真的,**而且就在我上一輪寫的東西裡**:
+
+刪掉 `from fluid_motion.core.proc import terminate_children`,**整個 suite 照樣綠**。
+
+執行期那是 `quit_app` 裡的 `NameError`——而 `NameError` 是 `Exception`,正好被我自己寫的那個「quitting must not be blockable」處理器吞掉:
+
+```python
+try:
+    killed = terminate_children()
+    ...
+except Exception:
+    pass            # <- NameError 也走這裡
+```
+
+收子行程於是靜靜地什麼都沒做,孤兒原封不動回來,不留痕跡。**§9.40 三題全中,出現在我自己的修正裡面。**
+
+處理器還是要寬(離開不能被擋住),改的是**壞掉的時候要講**:`pass` → `log_exc`。
+
+#### 兩條測試,兩個我自己的錯
+
+1. **第一版的失敗路徑測試是套套邏輯。** 它在測試裡自己重寫一份 try/except 再對自己的 `log_exc` 斷言——把 `app.py` 的處理器改回 `pass`,它照樣過。CLAUDE.md 那個 contact-sheet 例子的形狀。**刪掉重寫**,改成用 ast 檢查那個 handler 的內容不是裸 `pass`。
+2. **排序測試自己有洞。** 突變在 reap 前面插一個 `os._exit`,它沒抓到——我取的是**最後一個** `_exit` 的行號,而第一個之後的東西根本到不了。改成取最小值。
+
+五個突變全 CAUGHT。
+
+#### 這一輪的教訓
+
+**修正本身也要當成待審的程式碼,而且要用同一把尺。** 上一輪那個 `except Exception: pass` 是我為了「離開不能被擋住」寫的,理由正確;但它同時把「這段程式壞掉了」和「沒有子行程要收」變成同一個結果——正是我那一輪剛剛在別人程式裡找出來的那個形狀。
+
+**寫完測試也要問它會不會失敗。** 這一輪兩條測試裡有兩條是壞的,而兩條都是突變掃出來的,不是讀出來的。
