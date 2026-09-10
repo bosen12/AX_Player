@@ -731,7 +731,7 @@ def test_closing_hides_the_window_before_tearing_mpv_down(qapp, monkeypatch, tmp
 
 # -- sorting names the library actually contains ----------------------------
 def test_a_part_marker_in_one_filename_does_not_take_out_the_folder():
-    """①②③ / ⑴⑵⑶ / ❶❷❸ are Numeric_Type=Digit but not category Nd.
+    r"""①②③ / ⑴⑵⑶ / ❶❷❸ are Numeric_Type=Digit but not category Nd.
 
     str.isdigit() says yes for 128 such characters; the \d that split the
     name never matched them, and int() rejects them. One of them standing

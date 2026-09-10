@@ -79,7 +79,7 @@ def test_the_fetcher_and_the_log_agree_on_which_binaries_matter():
 
 # -- which mpv root wins --------------------------------------------------
 def test_the_bundled_runtime_is_preferred_over_a_personal_install(tmp_path, monkeypatch):
-    """"a fresh install just works off setup_mpv.py alone" -- the bundled root
+    r""""a fresh install just works off setup_mpv.py alone" -- the bundled root
     is checked first precisely so a machine that also has C:\mpv does not
     quietly take it over.
 
