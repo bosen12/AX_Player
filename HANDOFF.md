@@ -2393,3 +2393,73 @@ FM 新 exe 自報 1.6.7                 版本在 binary 裡
 onedir 複本                          359 vs 359 檔,無殘留
 六個發行複本 + 三個 GitHub 資產      SHA256 全部 MATCH
 ```
+
+### 9.51 09-10:第六個三題全中的邊界 —— 檔名裡的分部標記 ★
+
+照 §9.47 的作法先找零命中的角度:`locale` / `編碼` / `codepage` / `timezone` / `surrogate` 在 HANDOFF 裡都是 0。
+
+#### 但那一題其實已經關掉了,只是沒寫在這裡
+
+`contact_sheets.py` 的註解直接寫著 cp950 與 `UnicodeDecodeError`,FM 的 `proc.py` 同樣有一段講「不用 `text=True` 的 locale 解碼」。兩個 repo 的文字 I/O 全數帶明確 encoding。
+
+**教訓:對 HANDOFF grep 零命中,不等於沒做過。**程式碼本身才是答案所在,這正是 CLAUDE.md 警告的那個陷阱的鏡像版本——那邊是把 HANDOFF 的舊結論當新發現,這邊是把 HANDOFF 的沉默當成沒查過。
+
+#### 真正的洞:三套「數字」的定義不一樣
+
+`natural_key` 用 `str.isdigit()` 判斷一段是不是數字,但切出那些段落的是 `\d`。兩者對 **128 個字元**答案相反:
+
+```
+字元   \d      isdigit()   int()
+'2'    True    True        2
+'２'   True    True        2          (FULLWIDTH,Nd)
+'٢'    True    True        2          (ARABIC-INDIC,Nd)
+'²'    False   True        ValueError (SUPERSCRIPT)
+'①'    False   True        ValueError (CIRCLED)
+```
+
+128 個裡有 ①②③(27 個 dingbat、10 個 circled)、⑴⑵⑶、上標、下標——**東亞片庫裡真的會出現的分部標記**。
+
+命中條件比想像窄:那個字元要**單獨構成一段**,也就是被數字夾住,或出現在開頭並緊接數字。所以 `extra ①1.mkv` 沒事(那一段是 `extra ①`),`①1.mkv` 和 `1①2.mkv` 才會中。
+
+**第一次量錯了就是栽在這裡**——我先試 `extra ①1.mkv`,看到「6 個檔案正常列出」差點收工。對照組救了一次。
+
+#### 後果不是「少列一個」
+
+```
+對照組(五集正常檔案)     run() 正常返回      側欄:5 個檔案
+旁邊多一個 ①1.mkv         run() 擲 ValueError  側欄:done 訊號從未發出
+```
+
+`_ScanJob.run()` 只攔 `OSError`。ValueError 逃出去,而 `run()` 跑在 pool 執行緒上——traceback 進到打包版沒有的 stderr,側欄沒收到訊號就繼續顯示**上一個資料夾**。整個片庫因為一個檔名而消失,且不留痕跡。三題全中,第六個。
+
+修兩處:判斷改用切出段落的同一個 regex(構造上正確,兩套定義的落差消失);`run()` 補寬處理器,並照 §9.49 讓它**出聲**——回傳空清單本身也是錯答案,那行記錄是「壞了」與「本來就沒東西」唯一的差別。
+
+#### 同形狀掃過的四處,修一個
+
+| 位置 | 輸入來源 | 判斷 |
+|---|---|---|
+| AX `natural_key` | **使用者檔名** | 修 |
+| FM `mpv_detect:171` | **整台機器的管道命名空間** | 修 |
+| FM `inject:577` | FM 自己寫的 JSON,key 恆為 `str(pid)` | 不動 |
+| AX `contact_sheets:53` | 自產快取檔名;唯一非十進位路徑是「sha1 剛好全是數字」,而 `int()` 吃得下 | 不動 |
+
+FM 那個**沒有可信的觸發劇本**,決定它的不是機率,是那段字串不歸我們擔保:`_embedded_player_pids` 走的是全機器的管道名,命中的話其後每一個 tick 都以同樣方式失敗,補幀停擺。
+
+#### 順手掃出來的:只出聲一次的警告
+
+`SyntaxWarning` 是**編譯期**發出、然後被 `__pycache__` 吃掉的,所以它只在「改過原始碼的下一次執行」出現一次。AX 的測試裡躺著兩個:
+
+```
+tests/test_runtime_log.py:83   "\m"   docstring 裡的 C:\mpv   (既有)
+tests/test_library.py:736      "\d"   我這一輪自己帶進來的
+```
+
+第二個正是 CLAUDE.md 記著的「Bash heredocs eat backslashes」——它明講要用 Write/Edit,我用了 heredoc。
+
+兩個 repo 各加一張網:把每個 `.py` 重新編譯、警告全開。FM 現在是乾淨的,網放進去是因為這個失效模式的本質就是**沒有人看得到**。錨定在 `Path(__file__)`,不是 cwd。
+
+#### 量過、沒有發現的三件
+
+- **執行期 deprecation**:兩個 suite 在 3.14(出貨用的直譯器)上以 `-W error::DeprecationWarning` 全綠。
+- **檔名管線**:十種病態檔名(emoji、組合字、RTL mark、零寬、200 字元、全形、阿拉伯數字、U+FFFD)走完 掃描 → 排序 → `cache_key` → `resume` 來回,零例外,10 個快取鍵無碰撞。
+- **第一版探針的 resume 那一欄是空的** —— 我用 `hasattr(resume, "save")` 保護,而真名是 `save_progress`,不存在就回 None 也算 ok。§9.44 的「它量的是空氣」再一次,查函式名才發現。
