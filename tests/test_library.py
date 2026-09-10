@@ -727,3 +727,57 @@ def test_closing_hides_the_window_before_tearing_mpv_down(qapp, monkeypatch, tmp
     assert order.index("thumb_pool.clear") < order.index("player.shutdown"), (
         "queued grabs are dropped after the teardown they were meant to skip"
     )
+
+
+# -- sorting names the library actually contains ----------------------------
+def test_a_part_marker_in_one_filename_does_not_take_out_the_folder():
+    """①②③ / ⑴⑵⑶ / ❶❷❸ are Numeric_Type=Digit but not category Nd.
+
+    str.isdigit() says yes for 128 such characters; the \d that split the
+    name never matched them, and int() rejects them. One of them standing
+    alone as a part -- it only has to be flanked by digit runs, or start the
+    name -- made the sort key raise, and _ScanJob.run() caught OSError and
+    nothing else. The folder then never listed at all.
+    """
+    names = ["ep1.mkv", "ep2.mkv", "ep10.mkv", "①1.mkv", "1① 2.mkv"]
+
+    ordered = _sort_playlist([Path(n) for n in names], settings.SORT_NAME)
+
+    assert len(ordered) == len(names), "the sort dropped or duplicated a file"
+    assert [p.name for p in ordered][:3] == ["ep1.mkv", "ep2.mkv", "ep10.mkv"], (
+        "the ordinary episodes must still sort numerically among themselves"
+    )
+
+
+def test_the_scan_job_reports_a_sort_it_could_not_finish(tmp_path, monkeypatch):
+    """`done` is not optional, and neither is saying why it is empty.
+
+    run() executes on a pool thread, so an escaping exception goes to a
+    stderr a windowed build does not have -- and the sidebar, never having
+    been told anything, keeps showing the previous folder. An empty list is
+    still a wrong answer, so the log line is the only thing that makes the
+    difference between "this broke" and "there was nothing here".
+    """
+    from ax_player import app as app_mod
+    from ax_player import debug_log
+
+    (tmp_path / "ep01.mkv").write_bytes(b"")
+
+    def exploding(paths, mode):
+        raise ValueError("invalid literal for int() with base 10: '①'")
+
+    monkeypatch.setattr(app_mod, "_sort_playlist", exploding)
+
+    seen = []
+    signals = app_mod._ScanSignals()
+    signals.done.connect(lambda *args: seen.append(args))
+    job = _ScanJob(tmp_path, False, None, signals, settings.SORT_NAME, False)
+
+    job.run()
+
+    assert seen, "done was never emitted; the sidebar waits on it forever"
+    assert seen[0][1] == [], "a failed sort must not report a playlist it does not have"
+    text = debug_log.path().read_text(encoding="utf-8", errors="replace")
+    assert "ValueError" in text and "scan/sort" in text, (
+        "the folder came back empty with no trace of why"
+    )

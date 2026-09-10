@@ -189,10 +189,22 @@ def natural_key(name: str) -> tuple:
     Each part carries its own type tag so digit and text parts never compare
     against each other, and the raw name is appended to keep files that differ
     only in leading zeros ("ep02"/"ep2") in a deterministic order.
+
+    The digit test is the same regex that produced the parts, not
+    str.isdigit(). The two disagree on 128 characters -- ①②③, ⑴⑵⑶, ❶❷❸,
+    superscripts, subscripts -- which are Numeric_Type=Digit (so isdigit()
+    says yes) but not category Nd (so \\d never matched them, and int()
+    rejects them). Any of those standing alone as a part, which needs only
+    that it be flanked by digit runs or start the name, made int() raise
+    ValueError. _ScanJob.run() caught OSError and nothing else, so the sort
+    threw, the done signal was never emitted, and a folder of perfectly
+    ordinary episodes simply never appeared -- measured: five files listed,
+    then zero and no signal at all, from adding one "①1.mkv" beside them.
+    Part markers like these are not exotic in an East Asian media library.
     """
     lowered = name.lower()
     parts = tuple(
-        (1, int(part), "") if part.isdigit() else (0, 0, part)
+        (1, int(part), "") if _DIGITS.fullmatch(part) else (0, 0, part)
         for part in _DIGITS.split(lowered)
         if part
     )
@@ -304,6 +316,23 @@ class _ScanJob(QRunnable):
             # worker thread with the scan, not on the UI thread afterwards.
             playlist = _sort_playlist(self._scan(), self._sort_mode)
         except OSError:
+            playlist = []
+        except Exception as exc:  # noqa: BLE001 -- see below
+            # Anything the scan or the sort can raise that is not an OSError
+            # used to leave this method by throwing. It runs on a pool thread,
+            # so the traceback goes to a stderr a windowed build does not
+            # have, and -- the part that matters -- `done` is never emitted,
+            # which is not the same as emitting an empty folder: the sidebar
+            # keeps whatever it was showing and simply never updates. One
+            # unsortable filename took the whole folder out that way.
+            #
+            # Broad on purpose, and it says so rather than passing: §9.49's
+            # lesson is that a handler wide enough to keep the app alive must
+            # not also make "this broke" and "there was nothing here" the same
+            # observation. Emitting an empty list still shows the user a wrong
+            # answer, so the log line is the only thing that makes it
+            # answerable.
+            debug_log.log_exc(f"folder scan/sort failed for {self._folder!r}")
             playlist = []
         _emit_safely(
             self._signals.done,
