@@ -58,7 +58,10 @@ made an entire mutation-testing round report false results (§7).
 
 `build.bat` requires `py -3.14` explicitly; it does not fall back to an
 unversioned interpreter. That is the interpreter releases have been built
-with. Building on 3.10 produces a visibly smaller, different bundle.
+with. Building on 3.10 produces a visibly smaller, different bundle. The
+PyInstaller step deliberately replaces `PATH` with Windows system directories:
+dependency scanning otherwise bundles unrelated DLLs from whichever developer
+tools launched the build.
 
 ## Testing discipline
 

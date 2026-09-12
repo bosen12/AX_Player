@@ -2487,3 +2487,9 @@ IPC 的 timeout 現在是「等鎖 + 等回覆」共用一份 monotonic deadline
 FM 的視窗、CLI、README、站點與 package description 都改成 NVIDIA TensorRT / AMD ncnn-Vulkan 的真實產品描述；啟用按鈕接受「全域 runtime 尚未好、但已連線播放器自己的 runtime 已好」的合法狀態。兩個 `build.bat` 都只接受正式出貨用的 `py -3.14`，安裝或 PyInstaller 任一步失敗立即失敗，不再靜默降級到不確定的 `python`。
 
 最終驗證（版本號更新前的同一份生產碼）：AX 170 tests、FM 342 tests，各自在 Python 3.10 與 3.14 全綠；3.14 另把 DeprecationWarning / PendingDeprecationWarning 升成 error。AX onedir、AX onefile、FM onefile 均由 Python 3.14.6 / PyInstaller 6.22.2 成功建出。
+
+#### 發版檔自己又揭露一個環境污染
+
+第一次建完沒有直接發布：AX onefile 從上一版約 70 MB 膨脹到 84,443,641 bytes。`Analysis-00.toc` 給了確切來源——PyInstaller 沿呼叫者的 `PATH` 撿到 Codex 工具環境裡 Poppler/libheif 的 DLL，光 `icudt78.dll` 就 33 MB，跟 AX 完全無關。FM 也有同一形狀。
+
+兩個 `build.bat` 現在只在 pip 安裝完成後、PyInstaller 執行前，把 `PATH` 換成 `%SystemRoot%\system32;%SystemRoot%`；`py.exe` 仍可用，而 Python 與 site-packages 由正在跑的直譯器自己提供。實際 A/B：AX Analysis 的 `codex-runtimes` 來源 **48 → 0**、onefile **84,443,641 → 66,917,469 bytes**；FM **44 → 0**、**39,200,670 → 38,146,246 bytes**。兩邊各有一條 build 表面測試，拿掉隔離行都會紅。這不是為了省空間而猜 DLL 能不能刪，是從建置輸入端阻止不屬於專案的搜尋路徑進來。

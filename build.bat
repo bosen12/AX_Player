@@ -16,6 +16,11 @@ if /i "%~1"=="onefile" set "AXPLAYER_ONEFILE=1"
 
 py -3.14 -m pip install -r requirements.txt pyinstaller -q
 if errorlevel 1 goto :failed
+rem PyInstaller resolves binary dependencies through PATH. Keep the caller's
+rem toolchains out of the release: a Codex shell once pulled Poppler/libheif's
+rem ICU DLLs into AXPlayer, adding 38 MB of unrelated files. py.exe lives in
+rem SystemRoot, and PyInstaller knows the Python/package directories itself.
+set "PATH=%SystemRoot%\system32;%SystemRoot%"
 py -3.14 -m PyInstaller --noconfirm --clean AXPlayer.spec
 if errorlevel 1 goto :failed
 
