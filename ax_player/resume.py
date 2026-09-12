@@ -9,6 +9,7 @@ module doesn't duplicate that. It just gives the UI something to draw.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 
@@ -20,12 +21,36 @@ _cache: dict[str, dict] | None = None
 WATCHED_THRESHOLD = 0.95
 
 
+def _valid_entry(entry: object) -> dict | None:
+    if not isinstance(entry, dict) or not isinstance(entry.get("watched"), bool):
+        return None
+    try:
+        raw_pos = entry["pos"]
+        raw_duration = entry["duration"]
+        if isinstance(raw_pos, bool) or isinstance(raw_duration, bool):
+            return None
+        pos = float(raw_pos)
+        duration = float(raw_duration)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(pos) or not math.isfinite(duration) or pos < 0 or duration < 0:
+        return None
+    return {"pos": pos, "duration": duration, "watched": entry["watched"]}
+
+
 def _load() -> dict[str, dict]:
     global _cache
     if _cache is not None:
         return _cache
     try:
-        _cache = json.loads(resume_db_path().read_text(encoding="utf-8"))
+        parsed = json.loads(resume_db_path().read_text(encoding="utf-8"))
+        if not isinstance(parsed, dict):
+            parsed = {}
+        _cache = {
+            str(video): valid
+            for video, entry in parsed.items()
+            if (valid := _valid_entry(entry)) is not None
+        }
     except (OSError, ValueError):
         _cache = {}
     return _cache
@@ -40,12 +65,17 @@ def get_progress(video: str) -> dict | None:
     # raw matters because callers (the sidebar list build) do entry.get(...)
     # unconditionally: one malformed entry used to raise mid-loop and
     # silently truncate every row after it in the list.
-    if not isinstance(entry, dict) or "duration" not in entry:
-        return None
-    return entry
+    return _valid_entry(entry)
 
 
 def save_progress(video: str, pos: float, duration: float) -> None:
+    try:
+        pos = float(pos)
+        duration = float(duration)
+    except (TypeError, ValueError, OverflowError):
+        return
+    if not math.isfinite(pos) or not math.isfinite(duration):
+        return
     if duration <= 0 or pos < 0:
         return
     with _lock:
@@ -89,10 +119,8 @@ def set_watched(video: str, watched: bool) -> None:
             # it straight back -- which is what it did, silently, until now.
             removed = frozenset({video})
         else:
-            previous = data.get(video)
-            duration = (
-                float(previous.get("duration") or 0.0) if isinstance(previous, dict) else 0.0
-            )
+            previous = _valid_entry(data.get(video))
+            duration = previous["duration"] if previous is not None else 0.0
             entry = {"pos": 0.0, "duration": duration, "watched": True}
             if previous == entry:
                 return
@@ -140,7 +168,9 @@ def _merge_from_disk(
     for key, value in on_disk.items():
         if key in removed:
             continue
-        data.setdefault(key, value)
+        valid = _valid_entry(value)
+        if valid is not None:
+            data.setdefault(key, valid)
     return data
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import traceback
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 
 from ax_player.paths import app_data_dir
 
@@ -37,6 +38,18 @@ def path():
 #
 # One generation, not many: this is a live diagnostic, not an archive.
 MAX_BYTES = 1024 * 1024
+
+
+def safe_url(value: str) -> str:
+    """A support-log form of a URL without credentials or signed tokens."""
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return "<invalid-url>"
+    if not parts.scheme or not parts.netloc:
+        return "<redacted-url>"
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _rotate_if_needed(target) -> None:

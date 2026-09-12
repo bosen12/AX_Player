@@ -41,6 +41,18 @@ def _read(name: str) -> str:
     return (_repo() / name).read_text(encoding="utf-8", errors="replace")
 
 
+def test_build_uses_only_the_release_python_314_interpreter():
+    commands = [
+        line.strip().lower()
+        for line in _read("build.bat").splitlines()
+        if line.strip() and not line.strip().lower().startswith("rem ")
+    ]
+    assert "py -3.14 -m pyinstaller --noconfirm --clean axplayer.spec" in commands
+    assert any(line.startswith("py -3.14 -m pip ") for line in commands)
+    assert not any(re.search(r"(?<![\w.-])python\s+-m\s+", line) for line in commands)
+    assert not any(re.search(r"(?<![\w.-])py\s+-3(?:\s|$)", line) for line in commands)
+
+
 def _badge_license() -> str:
     """The short form the project uses for itself, taken from README's badge."""
     match = re.search(r"img\.shields\.io/badge/license-([^-\s)]+)-", _read("README.md"))

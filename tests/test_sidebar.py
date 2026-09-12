@@ -401,7 +401,7 @@ def test_removing_from_the_playlist_keeps_the_other_rows_intact(sidebar):
     window = types.SimpleNamespace(
         _playlist=[Path(p) for p in PATHS],
         sidebar=sidebar,
-        player=types.SimpleNamespace(remove_paths=lambda _paths: None),
+        player=types.SimpleNamespace(remove_paths=lambda paths: set(paths)),
         _playlist_items=lambda: _items(),
     )
     for path in PATHS:
@@ -418,6 +418,19 @@ def test_removing_from_the_playlist_keeps_the_other_rows_intact(sidebar):
     )
     assert sidebar._search.text() == "ep", "the search box was cleared"
     assert sidebar._rows[PATHS[2]].isSelected(), "the selection was lost"
+
+
+def test_rejected_playlist_removal_keeps_the_window_and_sidebar_rows(sidebar):
+    window = types.SimpleNamespace(
+        _playlist=[Path(p) for p in PATHS],
+        sidebar=sidebar,
+        player=types.SimpleNamespace(remove_paths=lambda _paths: set()),
+    )
+
+    AXPlayerWindow.remove_from_playlist(window, [PATHS[0]])
+
+    assert window._playlist == [Path(p) for p in PATHS]
+    assert PATHS[0] in sidebar._rows
 
 
 def test_the_context_menu_path_still_claims_the_row_it_opened_on(sidebar):

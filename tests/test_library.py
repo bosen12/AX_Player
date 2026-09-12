@@ -324,10 +324,67 @@ def _detached_player(loaded):
     sent = []
     return types.SimpleNamespace(
         _loaded=list(loaded),
+        _list_file=None,
         _sent=sent,
         _mpv=types.SimpleNamespace(command=lambda *a: sent.append(a)),
         _mpv_cmd=lambda *a: sent.append(a),
     )
+
+
+def test_rejected_playlist_load_keeps_the_previous_mirror(tmp_path):
+    from ax_player.player_widget import PlayerWidget
+
+    old = [tmp_path / "old-1.mkv", tmp_path / "old-2.mkv"]
+    new = [tmp_path / "new-1.mkv", tmp_path / "new-2.mkv"]
+    old_list = tmp_path / "old.m3u8"
+    old_list.write_text("old", encoding="utf-8")
+
+    class RejectingMpv:
+        playlist_start = 0
+
+        def command(self, *_args):
+            raise RuntimeError("loadlist rejected")
+
+    widget = types.SimpleNamespace(
+        _loaded=list(old), _list_file=old_list, _mpv=RejectingMpv()
+    )
+
+    assert PlayerWidget.load_playlist(widget, new, 1) is False
+    assert widget._loaded == old
+    assert widget._list_file == old_list
+    assert old_list.exists()
+
+
+def test_rejected_playlist_removal_keeps_the_path_to_index_mirror(tmp_path):
+    from ax_player.player_widget import PlayerWidget
+
+    playlist = [tmp_path / f"ep{i}.mkv" for i in range(3)]
+
+    class RejectingMpv:
+        def command(self, *_args):
+            raise RuntimeError("playlist-remove rejected")
+
+    widget = types.SimpleNamespace(_loaded=list(playlist), _mpv=RejectingMpv())
+    widget._mpv_cmd = types.MethodType(PlayerWidget._mpv_cmd, widget)
+
+    assert PlayerWidget.remove_paths(widget, {playlist[1]}) == set()
+    assert widget._loaded == playlist
+
+
+def test_rejected_url_load_keeps_the_folder_playlist_mirror(tmp_path):
+    from ax_player.player_widget import PlayerWidget
+
+    playlist = [tmp_path / f"ep{i}.mkv" for i in range(2)]
+
+    class RejectingMpv:
+        def command(self, *_args):
+            raise RuntimeError("loadfile rejected")
+
+    widget = types.SimpleNamespace(_loaded=list(playlist), _mpv=RejectingMpv())
+
+    PlayerWidget.play_url(widget, "https://example.com/live.m3u8")
+
+    assert widget._loaded == playlist
 
 
 def test_playing_a_url_stops_the_first_row_replaying_it(tmp_path):

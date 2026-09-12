@@ -1,7 +1,10 @@
 """Regression cover for the on-disk caches and the diagnostic log."""
+import json
 import os
 import time
 from pathlib import Path
+
+import pytest
 
 from ax_player import cache, contact_sheets, debug_log
 from ax_player.paths import app_data_dir
@@ -559,6 +562,54 @@ def test_a_malformed_resume_entry_does_not_take_the_rest_of_the_list_with_it():
     ]
     assert len(rows) == 4, "the list was truncated by a malformed entry"
     assert [bool((r["progress"] or {}).get("duration")) for r in rows] == [False, True, False, False]
+
+
+def test_a_non_object_resume_database_is_treated_as_empty():
+    from ax_player import resume
+    from ax_player.paths import resume_db_path
+
+    resume_db_path().write_text("[]", encoding="utf-8")
+    resume._cache = None
+
+    assert resume.get_progress("C:/V/a.mkv") is None
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"pos": "bad", "duration": 100.0, "watched": False},
+        {"pos": 5.0, "duration": "bad", "watched": False},
+        {"pos": -1.0, "duration": 100.0, "watched": False},
+        {"pos": 5.0, "duration": -1.0, "watched": False},
+        {"pos": float("nan"), "duration": 100.0, "watched": False},
+        {"pos": 5.0, "duration": float("inf"), "watched": False},
+        {"pos": 5.0, "duration": 100.0, "watched": "false"},
+    ],
+)
+def test_malformed_resume_fields_are_treated_as_absent(entry):
+    from ax_player import resume
+    from ax_player.paths import resume_db_path
+
+    resume_db_path().write_text(json.dumps({"C:/V/a.mkv": entry}), encoding="utf-8")
+    resume._cache = None
+
+    assert resume.get_progress("C:/V/a.mkv") is None
+
+
+def test_marking_watched_survives_a_malformed_previous_duration():
+    from ax_player import resume
+    from ax_player.paths import resume_db_path
+
+    video = "C:/V/a.mkv"
+    resume_db_path().write_text(
+        json.dumps({video: {"pos": 5.0, "duration": "bad", "watched": False}}),
+        encoding="utf-8",
+    )
+    resume._cache = None
+
+    resume.set_watched(video, True)
+
+    assert resume.get_progress(video) == {"pos": 0.0, "duration": 0.0, "watched": True}
 
 
 def test_a_zero_duration_sample_is_dropped_rather_than_divided_by():

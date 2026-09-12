@@ -312,26 +312,33 @@ class PlayerWidget(QWidget):
             pass
 
     # -- playback ----------------------------------------------------------
-    def load_playlist(self, videos: list[Path], start_index: int) -> None:
+    def load_playlist(self, videos: list[Path], start_index: int) -> bool:
         """Hand the whole folder to mpv so uosc's playlist and next/prev work."""
         if not videos:
-            return
+            return False
         handle = tempfile.NamedTemporaryFile(
             "w", suffix=".m3u8", delete=False, encoding="utf-8", newline="\n"
         )
         with handle as fh:
             for video in videos:
                 fh.write(f"{video}\n")
-        old = self._list_file
-        self._list_file = Path(handle.name)
-        self._loaded = list(videos)
+        new_list = Path(handle.name)
         try:
             self._mpv.playlist_start = start_index
-            self._mpv.command("loadlist", str(self._list_file), "replace")
+            self._mpv.command("loadlist", str(new_list), "replace")
         except Exception:
-            pass
+            debug_log.log_exc("load_playlist: loadlist command FAILED")
+            new_list.unlink(missing_ok=True)
+            return False
+        old = self._list_file
+        self._list_file = new_list
+        self._loaded = list(videos)
         if old is not None:
-            old.unlink(missing_ok=True)
+            try:
+                old.unlink(missing_ok=True)
+            except OSError:
+                debug_log.log_exc("load_playlist: old list cleanup FAILED")
+        return True
 
     def play_path(self, video: Path) -> bool:
         """Play a file by path rather than by sidebar position.
@@ -360,7 +367,10 @@ class PlayerWidget(QWidget):
         # source-checkout reproduction attempt played back fine, so the
         # actual failure, whatever it is, has to be observed from a real
         # run instead of guessed at again.
-        debug_log.log(f"play_url: url={url!r} config_dir={default_mpv_root()} ytdlp={ytdlp_exe()}")
+        debug_log.log(
+            f"play_url: url={debug_log.safe_url(url)!r} "
+            f"config_dir={default_mpv_root()} ytdlp={ytdlp_exe()}"
+        )
         # "replace" leaves mpv holding a one-entry playlist, so the folder this
         # used to mirror is gone from mpv but would still be sitting in
         # _loaded. play_path() addresses mpv *by index* off that list: clicking
@@ -370,24 +380,31 @@ class PlayerWidget(QWidget):
         # 1+ raise IndexError and do self-heal, which is why only the first row
         # looked stuck. remove_paths() has the same dependency: 移除選取 on row
         # 0 would issue playlist-remove 0 and drop the playing URL.
-        self._loaded = []
         try:
             self._mpv.command("loadfile", url, "replace")
+            self._loaded = []
             debug_log.log("play_url: loadfile command sent OK")
         except Exception:
             debug_log.log_exc("play_url: loadfile command FAILED")
 
-    def remove_paths(self, videos: set[Path]) -> None:
+    def remove_paths(self, videos: set[Path]) -> set[Path]:
         """Drop these files from mpv's playlist, addressed by path.
 
         Descending order so each removal cannot shift the index of one that
         has not been removed yet.
         """
-        for index in sorted(
-            (i for i, video in enumerate(self._loaded) if video in videos), reverse=True
-        ):
-            self._mpv_cmd("playlist-remove", str(index))
-        self._loaded = [video for video in self._loaded if video not in videos]
+        removed: set[Path] = set()
+        indexed = ((i, video) for i, video in enumerate(self._loaded) if video in videos)
+        for index, video in sorted(indexed, reverse=True):
+            try:
+                self._mpv.command("playlist-remove", str(index))
+            except Exception:
+                debug_log.log_exc(f"remove_paths: playlist-remove {index} FAILED")
+                continue
+            removed.add(video)
+        if removed:
+            self._loaded = [video for video in self._loaded if video not in removed]
+        return removed
 
     def toggle_fluid_motion(self) -> None:
         # Reuses the F3 binding zz-fluid-ipc.lua already registers, instead

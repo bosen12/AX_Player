@@ -24,6 +24,45 @@ def _log_once(monkeypatch, root: Path) -> str:
     return lines[0]
 
 
+def test_safe_url_removes_credentials_query_and_fragment():
+    url = "https://user:password@example.com/video/master.m3u8?token=secret#private"
+
+    safe = debug_log.safe_url(url)
+
+    assert safe == "https://example.com/video/master.m3u8"
+    for secret in ("user", "password", "token", "secret", "private"):
+        assert secret not in safe
+
+
+def test_both_url_log_call_sites_redact_but_play_the_original(monkeypatch):
+    from types import SimpleNamespace
+
+    from ax_player.app import AXPlayerWindow
+    from ax_player.player_widget import PlayerWidget
+
+    url = "https://user:password@example.com/live.m3u8?token=secret#private"
+    lines: list[str] = []
+    monkeypatch.setattr(debug_log, "log", lines.append)
+
+    window_calls = []
+    window = SimpleNamespace(player=SimpleNamespace(play_url=window_calls.append))
+    AXPlayerWindow.play_url(window, url)
+
+    mpv_calls = []
+    widget = SimpleNamespace(
+        _loaded=[Path("C:/V/ep1.mkv")],
+        _mpv=SimpleNamespace(command=lambda *args: mpv_calls.append(args)),
+    )
+    PlayerWidget.play_url(widget, url)
+
+    assert window_calls == [url]
+    assert mpv_calls == [("loadfile", url, "replace")]
+    joined = "\n".join(lines)
+    assert "example.com/live.m3u8" in joined
+    for secret in ("user", "password", "token", "secret", "private"):
+        assert secret not in joined
+
+
 def test_a_root_without_yt_dlp_says_so(monkeypatch, tmp_path):
     """The failing install: libmpv is there, so ensure_runtime() never runs and
     never fetches yt-dlp.exe. ytdlp_exe() is then None, script_opts drops

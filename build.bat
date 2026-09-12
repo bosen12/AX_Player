@@ -15,12 +15,9 @@ set "AXPLAYER_ONEFILE="
 if /i "%~1"=="onefile" set "AXPLAYER_ONEFILE=1"
 
 py -3.14 -m pip install -r requirements.txt pyinstaller -q
+if errorlevel 1 goto :failed
 py -3.14 -m PyInstaller --noconfirm --clean AXPlayer.spec
-if errorlevel 1 (
-  python -m pip install -r requirements.txt pyinstaller -q
-  python -m PyInstaller --noconfirm --clean AXPlayer.spec
-  if errorlevel 1 goto :failed
-)
+if errorlevel 1 goto :failed
 
 if "%AXPLAYER_ONEFILE%"=="1" goto :onefile
 

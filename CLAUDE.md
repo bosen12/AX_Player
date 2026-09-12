@@ -56,10 +56,9 @@ made an entire mutation-testing round report false results (§7).
 - Build: `build.bat` → onedir; `build.bat onefile` → single portable exe
 - After any round that ran tests: `Get-Process mpv | Stop-Process -Force`
 
-`build.bat` uses `py -3`, which resolves to **3.14** on this machine, and that
-is the interpreter releases have been built with. Building on 3.10 produces a
-visibly smaller, different bundle. If you change build interpreters, say so —
-it silently changes what ships.
+`build.bat` requires `py -3.14` explicitly; it does not fall back to an
+unversioned interpreter. That is the interpreter releases have been built
+with. Building on 3.10 produces a visibly smaller, different bundle.
 
 ## Testing discipline
 

@@ -2463,3 +2463,27 @@ tests/test_library.py:736      "\d"   我這一輪自己帶進來的
 - **執行期 deprecation**:兩個 suite 在 3.14(出貨用的直譯器)上以 `-W error::DeprecationWarning` 全綠。
 - **檔名管線**:十種病態檔名(emoji、組合字、RTL mark、零寬、200 字元、全形、阿拉伯數字、U+FFFD)走完 掃描 → 排序 → `cache_key` → `resume` 來回,零例外,10 個快取鍵無碰撞。
 - **第一版探針的 resume 那一欄是空的** —— 我用 `hasattr(resume, "save")` 保護,而真名是 `save_progress`,不存在就回 None 也算 ok。§9.44 的「它量的是空氣」再一次,查函式名才發現。
+
+### 9.52 09-12：逐行審完四個大檔後的跨執行緒、失敗提交與公開表面修正 ★
+
+這輪不是再列直覺清單。四個大檔逐行讀完後，所有改動先跑未修正控制、再做實際突變確認會紅，最後才保留。
+
+#### AX：mpv 拒絕命令時，Python 的播放清單不能先說成功
+
+`load_playlist`、`play_url`、`remove_paths` 原本都先改 `_loaded` 或視窗的 `_playlist`，再呼叫 mpv；命令失敗被吞掉後，Python 端的「路徑 → mpv index」鏡像就和真實播放清單分家。修成 mpv 接受後才提交狀態，部分刪除只回報真正成功的路徑，視窗與側欄也只刪那一部分。四個提前提交突變全 CAUGHT。
+
+`resume.json` 現在逐欄驗證型別、有限數與非負值，合法 JSON 但錯 schema 不再讓側欄掃描中斷；網址日誌移除 userinfo、query 與 fragment，實際交給 mpv 的原始網址不變。對非物件根節點、NaN/Infinity、錯誤 watched 型別與兩個實際網址記錄點的 11 個突變全 CAUGHT。
+
+#### FM：未知答案不再被猜成全域設定，設定更新也不再互相覆蓋
+
+讀不到播放器 `config-dir` 是暫時未知，不是「它一定使用 settings.mpv_root」。現在該 tick 安全略過，不快取猜測；apply 沿用 readiness 已確認的同一個 root。Lua 安裝失敗也不再把目錄永久標成完成。三個回退突變全 CAUGHT。
+
+pywebview 每個 bridge call 都可能在不同執行緒。設定更新改成鎖內 snapshot → 驗證 → 原子存檔 → 一次 rebind，避免兩個欄位的同時更新各自從舊 snapshot 出發、後寫者吃掉前寫者。瀏覽器端再把設定命令串成佇列，避免使用者的點擊順序被執行緒排程倒轉；輪詢在命令未完成時不覆畫舊 state。後端 snapshot 移出鎖與 UI 佇列移除的兩個突變都 CAUGHT。
+
+IPC 的 timeout 現在是「等鎖 + 等回覆」共用一份 monotonic deadline，不再各拿一份完整預算；0.50 秒測試的舊實作約 0.70 秒，修正後約 0.50 秒。測試後來也抓到自己的缺陷：背景 apply 是否安靜原先靠原始碼換行位置判斷，純排版就紅；改成 AST 檢查 call keyword，加入 `announce=True` 的突變直接 CAUGHT。
+
+#### 公開表面與建置
+
+FM 的視窗、CLI、README、站點與 package description 都改成 NVIDIA TensorRT / AMD ncnn-Vulkan 的真實產品描述；啟用按鈕接受「全域 runtime 尚未好、但已連線播放器自己的 runtime 已好」的合法狀態。兩個 `build.bat` 都只接受正式出貨用的 `py -3.14`，安裝或 PyInstaller 任一步失敗立即失敗，不再靜默降級到不確定的 `python`。
+
+最終驗證（版本號更新前的同一份生產碼）：AX 170 tests、FM 342 tests，各自在 Python 3.10 與 3.14 全綠；3.14 另把 DeprecationWarning / PendingDeprecationWarning 升成 error。AX onedir、AX onefile、FM onefile 均由 Python 3.14.6 / PyInstaller 6.22.2 成功建出。

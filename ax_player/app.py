@@ -798,7 +798,7 @@ class AXPlayerWindow(QWidget):
 
     def play_url(self, url: str) -> None:
         url = url.strip()
-        debug_log.log(f"AXPlayerWindow.play_url: url={url!r}")
+        debug_log.log(f"AXPlayerWindow.play_url: url={debug_log.safe_url(url)!r}")
         if url:
             self.player.play_url(url)
 
@@ -806,15 +806,17 @@ class AXPlayerWindow(QWidget):
         remove_set = {Path(p) for p in paths}
         if not remove_set or not self._playlist:
             return
-        self.player.remove_paths(remove_set)
-        self._playlist = [p for p in self._playlist if p not in remove_set]
+        removed = self.player.remove_paths(remove_set)
+        if not removed:
+            return
+        self._playlist = [p for p in self._playlist if p not in removed]
         # Not set_items(): rebuilding the list to delete a row from it reset
         # the scroll position, the search box and the selection, and dropped
         # every loaded thumbnail -- which request_thumbnail() then refused to
         # regenerate, because it had already recorded those paths as asked
         # for. The sidebar went permanently grey until the folder was
         # reopened. See Sidebar.remove_rows.
-        self.sidebar.remove_rows([str(p) for p in remove_set])
+        self.sidebar.remove_rows([str(p) for p in removed])
 
     def refresh_folder(self) -> None:
         """Rescan the open folder (F5). Files added since it was opened are
