@@ -25,7 +25,7 @@
 
 **重要**：打包版 AX Player 的 mpv root 解析順序是 `%LOCALAPPDATA%\AXPlayer\mpv-runtime` → `C:\mpv` → `%ProgramFiles%\mpv`。第一個不存在，所以**打包版實際使用 `C:\mpv`**。改 mpv 設定或 lua 要改那裡，不是 repo 的 `mpv-runtime/`（那份是給原始碼版和打包進 exe 的種子用的，兩邊要一起改）。
 
-目前版本：**AX Player v1.1.9**、**Fluid Motion v1.4.7**，都已 commit、push、build、部署、發 release。
+目前版本：**AX Player v1.3.9**、**Fluid Motion v1.6.10**（09-23 更新這一行；它原本停在 v1.1.9 / v1.4.7 快一個月，各節裡的版本才是逐輪記下的）。
 
 **上一版這句話有一半是錯的**：v1.1.8 的 tag 確實推上去了（指向 `b1be307`），但 **GitHub 上從來沒有 v1.1.8 的 release**，連草稿都沒有 —— 上一輪的發布那一步沒有成功，而這份文件寫成做完了。08-29 查 `gh release list` 才發現。已決定不補發，v1.1.9 直接取代它。**發完 release 要用 `gh release list` 看一眼**，不要憑印象寫進這裡。
 
@@ -2493,3 +2493,125 @@ FM 的視窗、CLI、README、站點與 package description 都改成 NVIDIA Ten
 第一次建完沒有直接發布：AX onefile 從上一版約 70 MB 膨脹到 84,443,641 bytes。`Analysis-00.toc` 給了確切來源——PyInstaller 沿呼叫者的 `PATH` 撿到 Codex 工具環境裡 Poppler/libheif 的 DLL，光 `icudt78.dll` 就 33 MB，跟 AX 完全無關。FM 也有同一形狀。
 
 兩個 `build.bat` 現在只在 pip 安裝完成後、PyInstaller 執行前，把 `PATH` 換成 `%SystemRoot%\system32;%SystemRoot%`；`py.exe` 仍可用，而 Python 與 site-packages 由正在跑的直譯器自己提供。實際 A/B：AX Analysis 的 `codex-runtimes` 來源 **48 → 0**、onefile **84,443,641 → 66,917,469 bytes**；FM **44 → 0**、**39,200,670 → 38,146,246 bytes**。兩邊各有一條 build 表面測試，拿掉隔離行都會紅。這不是為了省空間而猜 DLL 能不能刪，是從建置輸入端阻止不屬於專案的搜尋路徑進來。
+
+### 9.53 09-23：審 09-12 那一輪，FM 一個讓所有獨立 mpv 停止補幀的退化 ★，發 FM v1.6.10
+
+這一輪的要求是「質疑過去的 commit」。最近三個沒被這份文件的方法審過的是 §9.52 那兩個大改動（FM `4777199`、AX `e2e67c6`）和一個沒推上去的測試修正（FM `910ccbc`）。
+
+#### 審查結果
+
+| commit | 判斷 | 證據 |
+|---|---|---|
+| FM `910ccbc`（沒推） | **對，而且急** | CI 從 v1.6.7 起每次推送都紅（一個測試的子行程用 cp1252 印 U+0308）。以 `PYTHONIOENCODING=cp1252` 重現、修正後綠。推上去之後的 CI 是**這三週來第一次綠燈**，373 passed、0 skipped |
+| AX `e2e67c6` resume 驗證 | 對 | 疑點是新的 `_valid_entry` 要求 `watched` 是 bool，會不會把舊格式的條目丟掉並在下次寫入時永久刪除。對真的 `resume.json` 跑：**221 筆，0 筆會被判無效**；而且 git 顯示 `watched` 從第一版起就在格式裡 |
+| FM `4777199` config-dir | **退化，見下** | 真的 mpv 回答 `config-dir = ''` |
+| FM `4777199` 設定整份 rebind、JS 指令佇列 | 對 | 讀過所有持有 Settings 的地方（tray、bridge 都經 `engine.settings`），沒有持舊物件的呼叫端 |
+
+#### 1. ★ 直接執行的 mpv，從 v1.6.9 起一次都不會補幀
+
+`config-dir` 是 mpv 的**選項**，不是它實際用的目錄。對著 `C:\mpv` 的 mpv 問（`--load-scripts=no`，所以執行中的 FM 把它當 helper 不碰）：
+
+```
+沒帶 --config-dir    config-dir = ''     ~~/shaders/fluid_rife.vpy -> C:/mpv/shaders/fluid_rife.vpy
+帶 --config-dir=X    config-dir = 'X'    ~~/ -> X
+--no-config          config-dir = ''     ~~/ -> ''
+```
+
+沒有這個選項時 mpv 依序找 `%APPDATA%\mpv` 和自己的 exe 目錄，所以 v1.6.8 以前「退回 `settings.mpv_root`」對它是對的。`4777199` 把「讀不到」從那個退路分出來——方向對——但 `player_config_dir` 對「IPC 失敗」和「回答空字串」都回 `None`，於是空字串也成了「讀不到」：**每一台獨立的 mpv 每個 tick 都被標成「無法讀取播放器設定目錄」，而且那一支的 `continue` 跳過了之後的一切**。這台機器的日誌 09-04 有兩筆 `player ... (mpv) ready=True dir=C:\mpv`，就是會中的那種播放器；AX 自己設 `config_dir`，所以沒事——這也是它三週沒被發現的原因。
+
+端到端（真的 mpv、真的 RIFE、`APPDATA` 導到暫存、engine 快取指回真的那份所以不會編譯）：
+
+| | 15 秒內補幀？ | 面板 |
+|---|---|---|
+| HEAD（v1.6.9 的程式碼） | **否** | `ready=False missing='無法讀取播放器設定目錄'` |
+| 修正後 | 是，0.76 秒 | `ready=True dir='C:\mpv'` |
+
+`C:\mpv\shaders\fluid_rife.vpy` 前後 sha256 相同（同一組設定寫出的同一份檔）。
+
+修法：三種答案分開表示——路徑、`None`（沒有自己的設定目錄 → 設定的 root）、`IpcError`（沒回答 → 這一拍略過、不快取）。快取的是**答案**不是路徑，所以安裝器改了 `mpv_root` 之後會跟著走。`install_root()` 以前**完全沒有測試**，補了三條。
+
+**為什麼 Codex 那輪的測試沒抓到：** 它的假 `player_config_dir` 用 `None` 代表「逾時」——**假物件把缺陷本身編碼進去了**。§9.35 那一族「fixture 做的和 docstring 說的不一樣」的新變體：fixture 和 bug 犯了同一個混淆，所以兩者永遠一致。
+
+#### 2. 關掉補幀之後，mpv 自己的 `interpolation` 回不來
+
+`apply()` 從初版起就把 `interpolation` / `video-sync` / `hr-seek-framedrop` / `temporal-dither` 改成 RIFE 要的值，**從來不改回去**。擁有者的 `C:\mpv\mpv.conf` 開了 `interpolation`（配 `tscale=oversample`，給 165Hz 用），所以按一次 F3，smoothmotion 就關到播放器重開。端到端：修正前關掉後 `False`，修正後 `True`。
+
+還原的成本先量了（播放中的 1080p HEVC、擁有者的設定，媒體時間對牆鐘）：
+
+```
+control                  lost -0.026s ~ +0.016s
+interpolation 開/關      +0.017s          （= 雜訊）
+video-sync 切換          -0.067s / +0.058s（時脈重對，不是停頓）
+temporal-dither、hr-seek-framedrop  +0.017s
+hwdec auto-copy->auto-safe  +0.433s   ← 對照
+hwdec auto-safe->auto-copy  +0.183s
+```
+
+所以還原是對的預設。規則比照 hwdec（以 pid 為鍵、tick 清掃），另外三條：只還原**仍是我們設的值**的屬性；記的是**這一次覆蓋前**的值（補幀中使用者自己換過、seek 後又被覆蓋，要還他換的那個）；讀取沒回答就把其餘的一起留著不再問（mpv 單執行緒服務 IPC——§9.8 那個 37 秒的形狀，這次在結束程式的路徑上）。
+
+**我自己的修法第一版是錯的，是對照組抓到的**：一開始任何 `IpcError` 都停手，但「set 被拒絕」是 mpv 有回答，其餘的仍該還原。突變工具先跑的不突變對照組當場紅了——那條規矩（§7 環境陷阱最後一條）又救了一次。
+
+#### 3. 開窗的前 0.9 秒畫的是設計稿
+
+pywebview 的 bridge 在 `DOMContentLoaded` **之後**才注入。用一支 pywebview 探針在 WebView2 裡量：`DOMContentLoaded` 當下三次都沒有 `window.pywebview`，13–114ms 後才可呼叫；而 `window.chrome.webview`（WebView2 自己的宿主物件）一開始就在。`app.js` 在 `DOMContentLoaded` 就 `render(mock)`、`call()` 沒 bridge 就回 mock，下一個再問的是 900ms 的輪詢。
+
+在 WebView2 裡載入真的介面（前面插一支逐幀記錄 DOM 的腳本）、`get_state` 由真的 `Engine.state()` 回答：
+
+```
+修正前  +54ms   「還缺 TensorRT 執行環境。」、安裝鈕可見、開關「未啟用」（實際是開的）
+        +961ms  真的狀態
+修正後  +133ms  真的狀態；first-paint 在 232ms，所以假畫面一格都沒出現
+```
+
+mock 只留給一般瀏覽器的設計預覽（`fm-ui` 預覽已確認照畫）。新增的測試**用 node 跑真的 `app.js`**、驅動真的啟動順序，不比對字串。五個突變裡一個存活，查下去是死分支（`bridgeReady` 裡的 `if (api()) resolve()` 永遠走不到），刪掉的是分支不是補測試。
+
+#### 4. `--start-hidden` 被寫進設定檔
+
+自動啟動項是 `start "" <exe> --start-hidden`，`main()` 把它寫在剛載入、之後會被 Engine 整份存回的 Settings 上。自動啟動那次只要切過一次任何設定，`start_hidden=true` 就存下來，之後每次手動開都直接縮進托盤。測試直接跑真的 `main()`，webview／pystray 換成假模組。現在介面上沒有自動啟動的開關，所以只有舊版開過自動啟動的人會中——但那正是這個設定存在的人。
+
+#### 撤回：§7「查過、判斷不值得動」第 5 條（IPC pipeline 每 tick 省 230ms）的前提
+
+那條、`rate_snapshot` 的 docstring、`_MIN_READ` 的註解都寫「mpv 跑濾鏡時一次 round trip 約 15ms、整組約 230ms」。重量：
+
+| | round trip | snapshot（14 讀） | 一次送出（pipeline） |
+|---|---|---|---|
+| Python 3.14，沒有 RIFE | 1.04 ms | 15.2 ms | 0.7 ms |
+| Python 3.14，RIFE 開著 | 1.03 ms | 15.1 ms | 0.7 ms |
+| Python 3.10 | **15.5 ms** | **216.7 ms** | — |
+
+**忙不忙沒有差別，差別在直譯器。** `_command_locked` 第一次退避睡 0.5ms，3.11 以前 Windows 的 `time.sleep()` 把它捲到 15.6ms 的系統時脈。出貨版是 3.14，所以那組數字描述的是「用 3.10 跑原始碼」。pipeline 在出貨版最多省 14ms/tick——**結論（不做）不變，理由換掉**；註解都改了，FM 的 CLAUDE.md 加了一句「不要在 3.10 上量 IPC」。
+
+§5.6 又一次，而且是新的變體：**觀測本身沒錯，是在錯的直譯器上做的**，然後被當成 mpv 的性質寫進三處。
+
+#### 量了、沒有動的
+
+1. **關補幀時還原 hwdec 的停頓**：這台用 `hwdec=auto-copy`，永遠不切；AX 內建 runtime 是 `auto-safe`，關一次停 0.43 秒、開一次 0.18 秒（§8.3 在 720p h264 `--no-config` 量到 0.65）。可以把還原延到暫停或換檔時做，但那是濾鏡狀態機裡新的延遲狀態，擁有者本人碰不到，先記數字。
+2. **介面用 Google Fonts 的 render-blocking stylesheet**：CSS 在 36–51ms 開始、59–76ms 完成，first-paint 232–244ms。網路正常時不是瓶頸；改成本地字型要下載字型檔進 repo，沒做。
+3. **兩台播放器共用同一個 `fluid_rife.vpy`**，而 `MULTI` 寫死在檔案裡：只有 120/144/螢幕 這三種非固定倍率、兩台來源幀率不同、又剛好換檔時才會拿到別人的倍率。2×/3×/4× 下兩台寫的是同一份檔。邊角，沒動。
+4. **RIFE 開著時強制關掉 mpv 的 `interpolation`**：這是畫面取捨（疊 oversample 會混幀），初版就這樣、沒有記錄理由。這一輪只把「關掉後還回去」做對，不改「開著時關掉」。
+
+#### 發版驗證鏈
+
+```
+FM 373 passed  3.10 / 3.14（DeprecationWarning 視為錯誤）/ cp1252
+五個修正 commit 各自在獨立 worktree 裡全綠（351 → 364 → 364 → 369 → 373）
+每個修正都經突變驗證：最終 26 個突變全部 CAUGHT。途中 3 個存活——
+                          install_root 沒有測試（補三條）、refused set 那條少一個斷言（補上）、
+                          bridgeReady 的死分支（刪掉）；2 個樣式對不到而判 INVALID（見下）
+CI（windows-latest）      success，373 passed、0 skipped —— node 測試在 CI 上也有跑
+Analysis-00.toc           codex 路徑 0；exe 38,146,860 bytes（v1.6.9 是 38,146,246）
+新 exe 自報               "Fluid Motion 1.6.10 start"
+裝好的 exe 煙霧測試        一般的獨立 mpv（載入腳本、config-dir ''）1.69 秒開始補幀；
+                          hotkey 寫 off → interpolation 回到 True；寫 on → 重新套上；
+                          config.json 前後完全相同
+GitHub 資產 digest         sha256:e6b45736… == 本地 sha256（用 API 的 digest，不必重新下載）
+發行複本                   C:\Fluid_Motion\、C:\AX_Player\release\ 的 FluidMotion.exe 同一個 hash
+```
+
+**AX 這一輪沒有產品程式碼變更，所以沒有建置、沒有發版**——只有這份文件。§9.50 記過「有沒有改動是可以查的」：`git diff v1.3.9..HEAD -- ax_player` 是空的。
+
+#### 這一輪的操作與工具教訓
+
+- **執行中的 FM 被重啟過一次**：v1.6.9 在 11:15 左右被強制結束（沒有播放器連著），換上 1.6.10、用原本的命令列重新開啟。`fluid_debug.log` 裡 03:53、04:00 兩行 `backend: (none) -> trt` 是 UI 探針在行程內建 Engine 留下的，無害。
+- **工具自己的三個坑**：（1）FM 有些檔案的工作副本是 CRLF（`.gitattributes` 是 `eol=lf`，commit 時會正規化），`\n` 的突變樣式對不到——要依檔案的換行符號轉；（2）修法重構後，舊的突變樣式對不到；（3）拆 hunk 分次 commit 用 `git apply --cached` 時，Windows 的文字模式 stdin 會把 `\n` 變成 `\r\n`，patch 對不上任何東西——要送 bytes。前兩個被判成 INVALID 而不是被當成 SURVIVED，因為工具先檢查樣式恰好出現一次；**這條檢查值得一直留著**。
+- **不要用 `git checkout` 還原突變**（§9.21 說要用）——那是在工作樹沒有未提交改動時才成立。這一輪修正還沒 commit，還原改成從記憶體寫回、再以 sha256 比對原位元組。
