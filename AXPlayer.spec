@@ -71,14 +71,62 @@ a = Analysis(
     excludes=excludes,
     noarchive=False,
 )
+
+# Qt pieces the running app never loads. The PySide6 hook ships them because
+# they are *present*, not because anything here asks for them, and a plugin
+# brings its whole dependency tree: platforminputcontexts' virtual-keyboard
+# plugin alone pulls Qt6VirtualKeyboard -> Qt6Quick -> Qt6Qml/QmlModels/
+# OpenGL/Network, and imageformats' qpdf pulls Qt6Pdf. opengl32sw.dll (Mesa's
+# software OpenGL, 19.7 MB) has no dependant at all -- the hook adds it on its
+# own, for apps that render through Qt OpenGL. This one does not: widgets are
+# raster, and mpv draws into a native child window with its own GPU context.
+#
+# Chosen by measurement, not by name: a real session -- open a folder, scan,
+# play, generate thumbnails and contact sheets -- loaded exactly Qt6Core/Gui/
+# Widgets and their .pyd, qwindows, qmodernwindowsstyle and the qgif/qicns/
+# qico/qjpeg image plugins from PySide6. Nothing below was among them, and the
+# code has no SVG, OpenGL, Qt-network, PDF or input-method use (downloads go
+# through urllib; the window icon is icon.ico). Everything that *was* loaded
+# stays, and so do the small image plugins and translations nobody measured.
+# tests/test_bundle_contents.py pins that the two lists never overlap.
+UNUSED_QT = (
+    "pyside6/opengl32sw.dll",
+    "pyside6/qt6virtualkeyboard",
+    "pyside6/qt6quick",
+    "pyside6/qt6qml",
+    "pyside6/qt6opengl",
+    "pyside6/qt6pdf",
+    "pyside6/qt6network",
+    "pyside6/qt6svg",
+    "pyside6/qtnetwork.",
+    "pyside6/plugins/platforminputcontexts/",
+    "pyside6/plugins/tls/",
+    "pyside6/plugins/networkinformation/",
+    "pyside6/plugins/generic/",
+    "pyside6/plugins/iconengines/",
+    "pyside6/plugins/imageformats/qpdf",
+    "pyside6/plugins/imageformats/qsvg",
+    "pyside6/plugins/platforms/qdirect2d",
+)
+
+
+def _unused_qt(dest):
+    name = dest.replace("\\", "/").lower()
+    return any(name.startswith(prefix) for prefix in UNUSED_QT)
+
+
+a.binaries = [entry for entry in a.binaries if not _unused_qt(entry[0])]
+a.datas = [entry for entry in a.datas if not _unused_qt(entry[0])]
 pyz = PYZ(a.pure)
 
 # Both layouts are built from this one spec so the lists above can't drift
-# apart between them. Measured difference on this machine, click to window:
-# onedir ~2.0s, onefile ~3.6s -- onefile re-extracts the whole archive to
-# %TEMP% on every launch, which is what that extra time is. onedir is the
-# default; onefile stays available because a single portable file is worth
-# something when you just want to drop it somewhere.
+# apart between them. Launch to window on this machine, median of five,
+# re-measured 09-26 after the trims above: onedir 1.06s, onefile 1.53s
+# (v1.3.10's untrimmed onefile: 2.04s). The gap is onefile re-extracting the
+# whole archive to %TEMP% on every launch, which is also why every megabyte
+# left out above is paid back on each start. onedir is the default; onefile
+# stays available because a single portable file is worth something when you
+# just want to drop it somewhere.
 ONEFILE = os.environ.get("AXPLAYER_ONEFILE") == "1"
 
 common = dict(

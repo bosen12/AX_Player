@@ -56,6 +56,21 @@ made an entire mutation-testing round report false results (§7).
 - Build: `build.bat` → onedir; `build.bat onefile` → single portable exe
 - After any round that ran tests: `Get-Process mpv | Stop-Process -Force`
 
+`AXPlayer.spec` leaves out what the running app never loads — PIL/numpy
+(pulled in only by PyInstaller following python-mpv's lazy imports) and the
+Qt pieces in `UNUSED_QT` (virtual keyboard → Quick/Qml chain, `opengl32sw`,
+Pdf, Network, Svg). That took the onefile from 66.9 to 30.3 MB. The failure
+mode of an exclude is the worst kind: source and tests work, only the frozen
+build breaks. `tests/test_bundle_contents.py` derives from the source, so
+importing a new `PySide6.QtX` module that the spec drops goes red there first
+— take it out of `UNUSED_QT`, don't work around the test.
+
+Smoke-testing a **onefile** build: close it with `CloseMainWindow()` or stop
+only the child process. Killing the bootloader parent (`Stop-Process -Force`
+on every `AXPlayer`) skips its cleanup and leaves a ~150 MB `_MEI*` directory
+in `%TEMP%` per launch. Renaming the exe for an A/B changes the process name
+too, so match on the name you gave it.
+
 `build.bat` requires `py -3.14` explicitly; it does not fall back to an
 unversioned interpreter. That is the interpreter releases have been built
 with. Building on 3.10 produces a visibly smaller, different bundle. The

@@ -143,3 +143,110 @@ def test_the_import_time_scan_tells_eager_from_lazy():
     )
     assert _import_time_imports(source) == {"os", "PIL", "numpy"}
     assert _all_imports(source) == {"os", "PIL", "numpy", "yaml"}
+
+
+# -- Qt binaries the running app never loads --------------------------------
+# What a real session loaded from PySide6, measured from the process's module
+# list: open a folder, scan, play through a playlist, generate thumbnails and
+# contact sheets. Everything here is load-bearing; the spec's UNUSED_QT may
+# never touch any of it. Destination paths as PyInstaller writes them.
+LOADED_IN_A_REAL_SESSION = (
+    "PySide6/Qt6Core.dll",
+    "PySide6/Qt6Gui.dll",
+    "PySide6/Qt6Widgets.dll",
+    "PySide6/QtCore.pyd",
+    "PySide6/QtGui.pyd",
+    "PySide6/QtWidgets.pyd",
+    "PySide6/pyside6.abi3.dll",
+    "PySide6/MSVCP140_1.dll",
+    "PySide6/MSVCP140_2.dll",
+    "PySide6/plugins/platforms/qwindows.dll",
+    "PySide6/plugins/styles/qmodernwindowsstyle.dll",
+    "PySide6/plugins/imageformats/qgif.dll",
+    "PySide6/plugins/imageformats/qicns.dll",
+    "PySide6/plugins/imageformats/qico.dll",   # the window icon is icon.ico
+    "PySide6/plugins/imageformats/qjpeg.dll",  # every thumbnail and sheet
+)
+
+
+def _spec_tree() -> ast.Module:
+    return ast.parse((_repo() / "AXPlayer.spec").read_text(encoding="utf-8"))
+
+
+def _spec_qt_filter():
+    """The spec's own UNUSED_QT and _unused_qt, executed -- not a copy of them."""
+    wanted = []
+    for node in _spec_tree().body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "UNUSED_QT" for t in node.targets
+        ):
+            wanted.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name == "_unused_qt":
+            wanted.append(node)
+    assert len(wanted) == 2, "AXPlayer.spec lost UNUSED_QT or _unused_qt"
+    namespace: dict = {}
+    exec(compile(ast.Module(body=wanted, type_ignores=[]), "AXPlayer.spec", "exec"), namespace)
+    return namespace["UNUSED_QT"], namespace["_unused_qt"]
+
+
+def test_nothing_a_real_session_loads_is_dropped():
+    _prefixes, dropped = _spec_qt_filter()
+    hit = [dest for dest in LOADED_IN_A_REAL_SESSION if dropped(dest)]
+    assert not hit, f"UNUSED_QT drops what the running app loads: {hit}"
+    hit = [dest for dest in LOADED_IN_A_REAL_SESSION if dropped(dest.replace("/", "\\"))]
+    assert not hit, f"...and in the Windows spelling: {hit}"
+
+
+def test_the_filter_reads_the_paths_pyinstaller_actually_writes():
+    """On Windows the TOC says PySide6\\opengl32sw.dll, not PySide6/opengl32sw.dll.
+    Every other test here spells paths with "/", so a predicate that stopped
+    normalising separators would pass them all and drop nothing from a real
+    build -- the ~40 MB would quietly come back."""
+    _prefixes, dropped = _spec_qt_filter()
+    assert dropped("PySide6\\opengl32sw.dll")
+    assert dropped("PySide6\\plugins\\platforminputcontexts\\qtvirtualkeyboardplugin.dll")
+    assert not dropped("PySide6\\Qt6Widgets.dll")
+
+
+def test_no_qt_module_the_app_imports_is_dropped():
+    """Derived from the source: a new `from PySide6.QtX import ...` anywhere in
+    the package makes its .pyd and Qt6X.dll load-bearing, whether or not
+    anybody remembers this list exists. Function-level imports count."""
+    _prefixes, dropped = _spec_qt_filter()
+    shipped = sorted((_repo() / "ax_player").rglob("*.py")) + [_repo() / "packaging" / "launch.py"]
+    modules = set()
+    for path in shipped:
+        for name in _all_imports(path.read_text(encoding="utf-8")):
+            parts = name.split(".")
+            if parts[0] == "PySide6" and len(parts) > 1 and parts[1].startswith("Qt"):
+                modules.add(parts[1])
+    assert {"QtCore", "QtGui", "QtWidgets"} <= modules, f"scanned the wrong tree: {modules}"
+
+    hit = []
+    for module in sorted(modules):
+        suffix = module[2:]  # QtWidgets -> Widgets
+        for dest in (f"PySide6/{module}.pyd", f"PySide6/Qt6{suffix}.dll"):
+            if dropped(dest):
+                hit.append(f"{module}: {dest}")
+    assert not hit, "\n".join(["the source uses it, the release would not have it:", *hit])
+
+
+def test_the_qt_filter_is_actually_applied():
+    """The list and the predicate are pinned above; this pins that the spec
+    runs them. A helper nobody calls passed every test once already here
+    (HANDOFF 9.39)."""
+    rebound = set()
+    for node in _spec_tree().body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "a"
+                and any(isinstance(n, ast.Name) and n.id == "_unused_qt" for n in ast.walk(node.value))
+            ):
+                rebound.add(target.attr)
+    assert rebound >= {"binaries", "datas"}, (
+        f"only {sorted(rebound) or 'nothing'} is filtered; the rest of UNUSED_QT still ships"
+    )
