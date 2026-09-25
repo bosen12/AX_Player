@@ -461,3 +461,83 @@ def test_the_context_menu_path_still_claims_the_row_it_opened_on(sidebar):
         f"the menu was built for {shown}, not the row it was opened on"
     )
     assert sidebar._selected_paths() == [PATHS[2]]
+
+
+# -- removal against the real player bookkeeping ---------------------------
+class _RecordingMpv:
+    def __init__(self, refuse=()):
+        self.sent = []
+        self._refuse = set(refuse)
+
+    def command(self, *args):
+        if args[0] == "playlist-remove" and args[1] in self._refuse:
+            raise RuntimeError("playlist-remove rejected")
+        self.sent.append(args)
+
+
+def _window_over_real_player(sidebar, loaded, mpv):
+    """The window method wired to PlayerWidget.remove_paths itself.
+
+    Not a lambda standing in for it: the tests above fake remove_paths with
+    set() meaning "mpv refused", and the real method also answered set() when
+    mpv had never held the file -- so the fake could not tell the two apart
+    either, and the regression below sat under it for a release.
+    """
+    from ax_player.player_widget import PlayerWidget
+
+    player = types.SimpleNamespace(_loaded=[Path(p) for p in loaded], _mpv=mpv)
+    player.remove_paths = types.MethodType(PlayerWidget.remove_paths, player)
+    return types.SimpleNamespace(
+        _playlist=[Path(p) for p in PATHS], sidebar=sidebar, player=player
+    )
+
+
+def test_removal_works_before_anything_has_been_played(sidebar):
+    """The state after every normal launch.
+
+    main() restores the last library with reload_player=False, so the sidebar
+    lists the folder while mpv has loaded nothing and _loaded is []. For one
+    release 從清單移除 here did nothing -- no row removed, no mpv command, no
+    log line -- because "mpv never had it" came back as the same empty set as
+    "mpv refused".
+    """
+    mpv = _RecordingMpv()
+    window = _window_over_real_player(sidebar, loaded=[], mpv=mpv)
+
+    AXPlayerWindow.remove_from_playlist(window, [PATHS[1]])
+
+    assert PATHS[1] not in sidebar._rows, "the row survived a removal nothing refused"
+    assert Path(PATHS[1]) not in window._playlist
+    assert mpv.sent == [], "mpv holds nothing, so nothing may be sent to it by index"
+
+
+def test_removal_after_playing_still_goes_through_mpv(sidebar):
+    """Control for the test above: with the folder loaded, mpv is asked."""
+    mpv = _RecordingMpv()
+    window = _window_over_real_player(sidebar, loaded=PATHS, mpv=mpv)
+
+    AXPlayerWindow.remove_from_playlist(window, [PATHS[1]])
+
+    assert PATHS[1] not in sidebar._rows
+    assert mpv.sent == [("playlist-remove", "1")]
+
+
+def test_only_a_refusal_keeps_a_row(sidebar):
+    """Mixed selection: one row mpv holds and refuses, one it never had.
+
+    A re-list while playing (F5, a re-sort, 含子資料夾) is what puts rows in
+    the sidebar that mpv's playlist lacks, so a selection spanning both is
+    ordinary. The refused one stays -- mpv will still play it on next/prev --
+    and the other goes.
+    """
+    loaded = [PATHS[0], PATHS[1], PATHS[3]]  # PATHS[2] arrived with a re-list
+    mpv = _RecordingMpv(refuse={"1"})
+    window = _window_over_real_player(sidebar, loaded=loaded, mpv=mpv)
+
+    AXPlayerWindow.remove_from_playlist(window, [PATHS[1], PATHS[2]])
+
+    assert PATHS[1] in sidebar._rows, "mpv refused it, so it is still in its playlist"
+    assert PATHS[2] not in sidebar._rows, "mpv never had it; nothing could refuse"
+    assert window.player._loaded == [Path(p) for p in loaded], (
+        "the path-to-index mirror moved for a removal mpv did not make"
+    )

@@ -392,7 +392,25 @@ class PlayerWidget(QWidget):
 
         Descending order so each removal cannot shift the index of one that
         has not been removed yet.
+
+        Returns the paths mpv's playlist no longer holds -- removed just now,
+        *or never loaded in the first place*. Only a refusal keeps a path out
+        of the answer. The window deletes exactly these rows, so the two
+        cases must not look alike: mpv cannot refuse to drop a file it does
+        not have.
+
+        They did look alike for one release. This returned only what it had
+        just removed, which made "mpv refused" and "mpv never had it" both an
+        empty set, and remove_from_playlist() returns early on empty. The
+        second is the state after every normal launch -- main() restores the
+        library with reload_player=False, so the sidebar lists the folder
+        while _loaded is still [] -- and also any row a re-sort, F5 or 含子
+        資料夾 re-list surfaced while something was playing. In all of those,
+        從清單移除 did nothing at all, with no log line. The window-level
+        tests missed it because their fake remove_paths used set() to mean
+        "refused": the fixture made the same conflation as the bug.
         """
+        held = {video for video in self._loaded if video in videos}
         removed: set[Path] = set()
         indexed = ((i, video) for i, video in enumerate(self._loaded) if video in videos)
         for index, video in sorted(indexed, reverse=True):
@@ -404,7 +422,8 @@ class PlayerWidget(QWidget):
             removed.add(video)
         if removed:
             self._loaded = [video for video in self._loaded if video not in removed]
-        return removed
+        refused = held - removed
+        return set(videos) - refused
 
     def toggle_fluid_motion(self) -> None:
         # Reuses the F3 binding zz-fluid-ipc.lua already registers, instead
