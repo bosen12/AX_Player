@@ -55,6 +55,9 @@ made an entire mutation-testing round report false results (§7).
 - Run from source: `run.bat` (installs deps, fetches mpv if needed, launches)
 - Build: `build.bat` → onedir; `build.bat onefile` → single portable exe
 - After any round that ran tests: `Get-Process mpv | Stop-Process -Force`
+- CI (`.github/workflows/tests.yml`) runs the suite on 3.10 and 3.14 from a
+  clean checkout on every push. It runs `setup_mpv.py` first: python-mpv
+  cannot even import without `libmpv-2.dll`, which is gitignored.
 
 `AXPlayer.spec` leaves out what the running app never loads — PIL/numpy
 (pulled in only by PyInstaller following python-mpv's lazy imports) and the

@@ -251,3 +251,51 @@ def test_a_response_with_neither_framing_is_refused(monkeypatch, tmp_path):
 
     assert not dest.exists(), "an unverifiable body was renamed into place"
     assert not list(tmp_path.glob("*.part")), "staging file left behind"
+
+
+# -- setup_mpv.py on a console that cannot print Chinese ---------------------
+_SETUP_ON_CP1252 = '''
+import sys
+from pathlib import Path
+
+repo, target = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(repo))
+import setup_mpv
+
+setup_mpv.bundled_mpv_root = lambda: target
+
+
+def fake_fetch(dest, on_progress=print):
+    on_progress("下載中：mpv.exe")          # what the real fetcher reports
+    for name in ("mpv.exe", "libmpv-2.dll", "yt-dlp.exe"):
+        (dest / name).write_bytes(b"x")
+
+
+setup_mpv.fetch_binaries = fake_fetch
+raise SystemExit(setup_mpv.main())
+'''
+
+
+def test_setup_mpv_survives_an_output_that_cannot_encode_its_progress(tmp_path):
+    """CI's first run on windows-latest: stdout is a pipe in cp1252, `print`
+    is the progress callback, and the first Chinese progress line raised
+    UnicodeEncodeError from inside the download. setup_mpv reported that as a
+    failed fetch and exited 1 -- a line it could not display aborted the work.
+    This zh-TW machine (cp950) could never show it."""
+    import subprocess
+    import sys
+
+    import ax_player
+
+    repo = Path(ax_player.__file__).resolve().parent.parent
+    env = dict(os.environ, PYTHONIOENCODING="cp1252")
+    result = subprocess.run(
+        [sys.executable, "-c", _SETUP_ON_CP1252, str(repo), str(tmp_path)],
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    output = (result.stdout + result.stderr).decode("cp1252", errors="replace")
+    assert result.returncode == 0, f"setup_mpv failed on a cp1252 pipe:\n{output}"
+    assert "Done:" in output
+    assert all((tmp_path / n).is_file() for n in ("mpv.exe", "libmpv-2.dll", "yt-dlp.exe"))

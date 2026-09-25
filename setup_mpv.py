@@ -21,6 +21,19 @@ from ax_player.paths import bundled_mpv_root  # noqa: E402
 
 
 def main() -> int:
+    # The progress messages are Chinese and `print` is the progress callback,
+    # so an output stream that cannot encode them made the callback raise
+    # UnicodeEncodeError from inside fetch_binaries -- which the handler below
+    # reported as a failed download and exited 1. A progress line that cannot
+    # be displayed was aborting the actual work. That is any piped stdout on a
+    # machine whose code page is not a CJK one: CI on windows-latest (cp1252)
+    # failed on its very first run, while this zh-TW machine (cp950) never
+    # could. Unencodable characters are escaped instead; nothing raises.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass  # not a TextIOWrapper (redirected into something else)
     target = bundled_mpv_root()
     files = ["mpv.exe", "libmpv-2.dll", "yt-dlp.exe"]
     if all((target / name).is_file() for name in files):
