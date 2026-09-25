@@ -965,13 +965,8 @@ def test_restoring_the_library_does_not_block_the_calling_thread(qapp, tmp_path,
     monkeypatch.setattr(app_mod, "_find_library", slow_share)
     opened = []
 
-    # A QObject living on this (the UI) thread, borrowing the real slot --
-    # because that is what receives the signal in the app: AXPlayerWindow is a
-    # QObject, so the answer is queued to its thread. The first version used a
-    # SimpleNamespace here, and on CI (windows-latest, 3.10) the queued call
-    # never arrived within 5 s: 0 of 48 local runs reproduced it, and PySide6
-    # routes a non-QObject callable through a hidden receiver whose thread is
-    # its own business. Testing the shape the app actually has.
+    # A QObject on this (the UI) thread, borrowing the real slot: the answer
+    # is collected by a QTimer parented to the window, as in the app.
     from PySide6.QtCore import QObject
 
     class Window(QObject):
@@ -980,29 +975,11 @@ def test_restoring_the_library_does_not_block_the_calling_thread(qapp, tmp_path,
         def __init__(self):
             super().__init__()
             self._folder = None
-            self._restore_signals = app_mod._RestoreSignals(self)
-            self._restore_signals.found.connect(self._on_library_found)
 
         def open_folder(self, folder, **kw):
             opened.append((folder, kw))
 
     window = Window()
-
-    # What happened to the answer, if it never arrives. On CI it did not, on
-    # both interpreters, while 48 local runs delivered it every time -- so the
-    # failure message has to say whether the emit ran, raised, or went nowhere.
-    emits = []
-    real_emit_safely = app_mod._emit_safely
-
-    def recording_emit_safely(signal, *args):
-        try:
-            signal.emit(*args)
-            emits.append(("emitted", threading.current_thread().name))
-        except Exception as exc:  # noqa: BLE001 -- recorded, then handed on
-            emits.append(("raised", repr(exc)))
-            real_emit_safely(signal, *args)
-
-    monkeypatch.setattr(app_mod, "_emit_safely", recording_emit_safely)
 
     started = time.perf_counter()
     AXPlayerWindow.restore_library(window, "any")
@@ -1018,9 +995,34 @@ def test_restoring_the_library_does_not_block_the_calling_thread(qapp, tmp_path,
     workers = [t.name for t in threading.enumerate() if t.name == "ax-restore-library"]
     assert asked_on and asked_on[0] is not threading.main_thread(), "the share was asked on the UI thread"
     assert opened == [(Path(tmp_path), {"reload_player": False})], (
-        f"emits={emits} worker_still_alive={bool(workers)} "
+        f"worker_still_alive={bool(workers)}: "
         "a found library must be listed without being handed to mpv"
     )
+
+
+def test_the_restore_thread_never_touches_qt():
+    """The answer used to come back as a Qt signal emitted from the daemon
+    thread. On CI that queued call was lost in 4 of 6 jobs -- emit() returned
+    normally, the thread ended, the slot never ran -- while 48 local runs
+    delivered it. Lost in the app, the library would simply not come back on
+    launch. The thread now only appends to a list; this keeps it that way."""
+    import ast
+    import inspect
+    import textwrap
+
+    from ax_player import app as app_mod
+
+    source = textwrap.dedent(inspect.getsource(AXPlayerWindow.restore_library))
+    ask = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "ask"
+    )
+    names = {n.id for n in ast.walk(ask) if isinstance(n, ast.Name)}
+    attrs = {n.attr for n in ast.walk(ask) if isinstance(n, ast.Attribute)}
+    assert "_emit_safely" not in names and "emit" not in attrs, (
+        "the restore thread emits a Qt signal again"
+    )
+    assert "_find_library" in names, "the thread no longer asks the share at all"
 
 
 def test_a_late_answer_does_not_replace_a_folder_opened_meanwhile():

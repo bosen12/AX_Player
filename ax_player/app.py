@@ -266,11 +266,6 @@ def _reveal(video: Path) -> None:
         debug_log.log_exc(f"reveal_in_explorer: {video}")
 
 
-class _RestoreSignals(QObject):
-    # the last library, resolved -- emitted only once it is known to exist
-    found = Signal(str)
-
-
 def _find_library(folder: str) -> str | None:
     """The last library's resolved path if it is still there, else None.
 
@@ -462,8 +457,6 @@ class AXPlayerWindow(QWidget):
         self._scan_pool.setMaxThreadCount(1)
         self._scan_signals = _ScanSignals(self)
         self._scan_signals.done.connect(self._on_folder_scanned)
-        self._restore_signals = _RestoreSignals(self)
-        self._restore_signals.found.connect(self._on_library_found)
 
         self._thumb_pool.start(_PruneCacheJob())
 
@@ -664,14 +657,38 @@ class AXPlayerWindow(QWidget):
         the timeout. And not a QThreadPool at all, because a pool drains on
         destruction (HANDOFF 9.48): closing the app in that window would hide
         it at once and then keep the process alive until the share timed out.
+
+        The answer comes back by polling, not by a signal, and the thread never
+        touches Qt. The first version emitted a Qt signal from it, and on CI
+        (windows-latest) that queued call was lost in 4 of 6 jobs across both
+        interpreters: emit() returned normally, the thread finished, and the
+        slot simply never ran -- while 48 local runs delivered it every time.
+        A thread Qt did not start, emitting exactly once, is the least-trodden
+        path there is (python-mpv's event thread is foreign too, but it emits
+        continuously, so a lost first event would never show). Lost here, the
+        library just would not come back on launch, with nothing in the log.
+        A list append is safe across threads; the timer runs on this one.
         """
+        answer: list[str | None] = []
 
         def ask() -> None:
-            found = _find_library(folder)
-            if found is not None:
-                _emit_safely(self._restore_signals.found, found)
+            answer.append(_find_library(folder))
 
         threading.Thread(target=ask, name="ax-restore-library", daemon=True).start()
+
+        timer = QTimer(self)
+        timer.setInterval(50)
+
+        def collect() -> None:
+            if not answer:
+                return
+            timer.stop()
+            timer.deleteLater()
+            if answer[0] is not None:
+                self._on_library_found(answer[0])
+
+        timer.timeout.connect(collect)
+        timer.start()
 
     def _on_library_found(self, folder: str) -> None:
         # Anything opened while the check was out -- a drop, the folder
