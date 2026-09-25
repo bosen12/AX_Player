@@ -541,3 +541,33 @@ def test_only_a_refusal_keeps_a_row(sidebar):
     assert window.player._loaded == [Path(p) for p in loaded], (
         "the path-to-index mirror moved for a removal mpv did not make"
     )
+
+
+# -- strings the app does not author are shown, never interpreted ------------
+def test_a_marked_up_media_title_is_shown_verbatim(qapp):
+    """The title bar shows mpv's media-title: the container's own metadata or
+    a stream's far end, not the file name. Under Qt's default AutoText,
+    "<font size=7>" asked the label for 34 px where plain text asks for 12,
+    "<b>" was swallowed, "&amp;" was shown as "&" and <img> became an object
+    glyph. Fluid Motion's web UI escapes the same property."""
+    bar = ui.TitleBar()
+    bar.resize(900, 40)
+    bar.set_title("Plain Episode 01")
+    plain_height = bar._title.sizeHint().height()
+
+    for title in ("<font size=7>BIG</font> title", "Top 10 <b>moments</b>", "Tom &amp; Jerry"):
+        bar.set_title(title)
+        assert bar._title.textFormat() == Qt.TextFormat.PlainText
+        assert bar._title.sizeHint().height() == plain_height, (
+            f"{title!r} was rendered as markup and resized the label"
+        )
+    bar.deleteLater()
+
+
+def test_file_and_folder_names_are_not_interpreted_either(sidebar):
+    """A Windows name can't hold "<", but it can hold "&amp;" -- both "&" and
+    ";" are legal -- and AutoText decodes entities as well as tags."""
+    popup = ui.ContactSheetPopup()
+    assert popup._caption.textFormat() == Qt.TextFormat.PlainText
+    assert sidebar._folder_name.textFormat() == Qt.TextFormat.PlainText
+    popup.deleteLater()

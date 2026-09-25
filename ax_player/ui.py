@@ -235,6 +235,16 @@ class TitleBar(QWidget):
         self._title = QLabel("", self)
         self._title.setObjectName("nowTitle")
         self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # PlainText, not the default AutoText. This shows mpv's media-title,
+        # which is whatever the container's own metadata or a stream's far end
+        # says -- not the file name. Under AutoText, anything Qt judges to be
+        # markup was rendered as markup: "<b>" swallowed and bolded, entities
+        # decoded ("&amp;" shown as "&"), <img> replaced by an object glyph
+        # (and looked up as a local file), and "<font size=7>" asked the label
+        # for 34 px where plain text asks for 12. The elision is measured on
+        # the raw string, too, so a long marked-up title could be cut mid-tag.
+        # Fluid Motion's web UI escapes the same property for the same reason.
+        self._title.setTextFormat(Qt.TextFormat.PlainText)
 
         self._fluid = _ChromeButton("fluid", self, width=38)
         self._fluid.setToolTip("切換 Fluid Motion 補幀")
@@ -662,6 +672,9 @@ class ContactSheetPopup(QWidget):
         self._caption = QLabel(self)
         self._caption.setObjectName("sheetCaption")
         self._caption.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        # A file name can't hold "<" on Windows, but it can hold "&amp;" --
+        # both characters are legal -- and AutoText decodes entities too.
+        self._caption.setTextFormat(Qt.TextFormat.PlainText)
         self._label = QLabel(self)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._caption)
@@ -778,6 +791,8 @@ class Sidebar(QWidget):
 
         self._folder_name = QLabel("尚未開啟資料夾", self)
         self._folder_name.setObjectName("folderName")
+        # Same as the preview caption: a folder name can carry "&amp;".
+        self._folder_name.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self._folder_name)
 
         self._search = QLineEdit(self)
