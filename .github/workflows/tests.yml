@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the test interpreter CLAUDE.md names; 3.14 is what releases
+        # are built with. The discipline here is that both are green.
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      # libmpv-2.dll, mpv.exe and yt-dlp.exe are gitignored, and python-mpv
+      # needs the DLL to import at all -- so the suite cannot even collect
+      # without them. Cached on the fetcher's own source so a change to how
+      # they are fetched re-fetches, and a push otherwise does not download
+      # ~75 MB from SourceForge and GitHub each time.
+      - name: Cache mpv binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            mpv-runtime/mpv.exe
+            mpv-runtime/libmpv-2.dll
+            mpv-runtime/yt-dlp.exe
+          key: mpv-binaries-${{ hashFiles('ax_player/mpv_fetch.py') }}
+      - name: Fetch mpv
+        run: python setup_mpv.py
+      - name: Test
+        run: python -m pytest tests -q
