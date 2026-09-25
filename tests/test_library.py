@@ -18,7 +18,7 @@ from ax_player.app import (
 class _Window:
     """Enough of AXPlayerWindow for the unbound methods under test."""
 
-    def __init__(self, folder, playlist, recursive=False, mpv_holds=()):
+    def __init__(self, folder, playlist, recursive=False, mpv_holds=(), mpv_loads=True):
         self._folder = folder
         self._playlist = playlist
         self._recursive = recursive
@@ -26,8 +26,16 @@ class _Window:
         self._holds = set(mpv_holds)
         self.opened = None
         self.selected = None
+        self.loads = []
+
+        def load_playlist(videos, index):
+            self.loads.append((list(videos), index))
+            return mpv_loads
+
         self.player = types.SimpleNamespace(
-            play_path=lambda v: v in self._holds, setFocus=lambda *a: None
+            play_path=lambda v: v in self._holds,
+            load_playlist=load_playlist,
+            setFocus=lambda *a: None,
         )
 
     def open_folder(self, folder, select=None, **kw):
@@ -49,8 +57,25 @@ def test_playing_a_listed_file_does_not_reopen_the_folder():
     assert w.opened is None
 
 
-def test_a_stale_mpv_playlist_reloads_at_the_library_root():
+def test_a_stale_mpv_playlist_reloads_from_the_list_on_screen():
+    """mpv holds nothing -- the state after every launch, since main()
+    restores the library with reload_player=False.
+
+    This used to reopen the folder, and a rescan reads the disk: rows removed
+    with 從清單移除 came back, into the sidebar and into mpv's playlist, so
+    next/prev played what the user had just taken out. The listed library is
+    what they are looking at, so that is what mpv gets.
+    """
     w = _Window(ROOT, LISTED, recursive=True)  # mpv holds nothing
+    AXPlayerWindow.play(w, SUB / "b.mp4")
+    assert w.opened is None, "a click is not a refresh; nothing should be rescanned"
+    assert w.loads == [(LISTED, 1)], "mpv must get the listed library, at the clicked row"
+
+
+def test_a_refused_reload_falls_back_to_rescanning_the_library_root():
+    """The rescan survives as the fallback, and keeps its own guarantee:
+    reopen the library root, not the subdirectory the file happens to be in."""
+    w = _Window(ROOT, LISTED, recursive=True, mpv_loads=False)
     AXPlayerWindow.play(w, SUB / "b.mp4")
     assert w.opened == ROOT
     assert w.selected == SUB / "b.mp4"
@@ -838,3 +863,64 @@ def test_the_scan_job_reports_a_sort_it_could_not_finish(tmp_path, monkeypatch):
     assert "ValueError" in text and "scan/sort" in text, (
         "the folder came back empty with no trace of why"
     )
+
+
+def test_a_removed_row_stays_removed_through_the_first_click(qapp, tmp_path):
+    """The whole flow a user walks after launching, on the real pieces.
+
+    main() restores the library without loading mpv, the user takes a row out
+    with 從清單移除, then clicks another. Two releases each broke one half:
+    v1.3.9's remove did nothing in this state at all, and every release before
+    it let the removal through only for the click to rescan the disk and bring
+    the row back -- into the sidebar and into mpv's playlist.
+    """
+    from ax_player import ui
+    from ax_player.app import _ScanSignals
+    from ax_player.player_widget import PlayerWidget
+
+    folder = tmp_path.resolve()
+    for i in range(1, 6):
+        (folder / f"ep{i}.mkv").write_bytes(b"")
+
+    class Mpv:
+        playlist_start = 0
+
+        def command(self, *args):
+            pass
+
+    player = types.SimpleNamespace(
+        _loaded=[], _list_file=None, _mpv=Mpv(), setFocus=lambda *a: None
+    )
+    for name in ("remove_paths", "play_path", "load_playlist"):
+        setattr(player, name, types.MethodType(getattr(PlayerWidget, name), player))
+
+    window = types.SimpleNamespace(
+        _folder=None, _playlist=[], _listed=None, _recursive=False,
+        _sort_mode=settings.SORT_NAME, _current=None,
+        sidebar=ui.Sidebar(), player=player, rescans=0,
+        _queue_all_contact_sheets=lambda: None,
+    )
+    for name in ("play", "remove_from_playlist", "_on_folder_scanned",
+                 "_playlist_items", "_first_unwatched_index"):
+        setattr(window, name, types.MethodType(getattr(AXPlayerWindow, name), window))
+
+    def open_folder(target, select=None, *, reload_player=True):
+        window.rescans += 1
+        window._folder = Path(target).resolve()
+        signals = _ScanSignals()
+        signals.done.connect(window._on_folder_scanned)
+        _ScanJob(window._folder, False, select, signals, window._sort_mode, reload_player).run()
+
+    window.open_folder = open_folder
+
+    window.open_folder(folder, reload_player=False)  # what main() does
+    window.remove_from_playlist([str(folder / "ep2.mkv")])
+    window.play(folder / "ep4.mkv")
+
+    listed = [Path(p).name for p in window.sidebar._rows]
+    handed = [p.name for p in player._loaded]
+    assert "ep2.mkv" not in listed, "the click rescanned the disk and the row came back"
+    assert "ep2.mkv" not in handed, "mpv's next/prev would play the removed episode"
+    assert handed == ["ep1.mkv", "ep3.mkv", "ep4.mkv", "ep5.mkv"]
+    assert window.rescans == 1, "only the launch should have scanned"
+    window.sidebar.deleteLater()

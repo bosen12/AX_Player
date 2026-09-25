@@ -789,11 +789,24 @@ class AXPlayerWindow(QWidget):
         # By path, not by sidebar position: after a re-sort during playback the
         # two orders differ on purpose (see _on_folder_scanned), and an index
         # taken from here would land on a different file in mpv's playlist.
-        # A miss means mpv is holding a playlist that predates this file, so
-        # reload it -- pointed at the file that was asked for.
+        # A miss means mpv is holding a playlist that predates this row, or
+        # none at all, so reload it -- pointed at the file that was asked for.
+        #
+        # From the list on screen, not from a rescan. This used to reopen the
+        # folder, and a rescan reads the disk: every row 從清單移除 had taken
+        # out came back, and went into mpv's playlist with it, so next/prev
+        # played the episode the user had just removed. The miss is the
+        # ordinary case, not a corner -- main() restores the library with
+        # reload_player=False, so the first click after every launch lands
+        # here, as does the first click after a URL replaced mpv's list. The
+        # video is known to be in _playlist (the branch above returned
+        # otherwise), which is last scan minus removals: exactly what the
+        # user is looking at. A rescan is only the fallback for mpv refusing
+        # the load.
         if not self.player.play_path(video):
-            self.open_folder(self._folder, select=video)
-            return
+            if not self.player.load_playlist(self._playlist, self._playlist.index(video)):
+                self.open_folder(self._folder, select=video)
+                return
         self.player.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def play_url(self, url: str) -> None:
@@ -1209,9 +1222,9 @@ def main(argv: list[str] | None = None) -> int:
         # reload_player=False: restoring the library is not a request to play
         # anything. Handing the playlist to mpv starts it immediately (nothing
         # sets pause), so launching the app used to begin playing the first
-        # file of the last folder every single time. The first click pays for
-        # one rescan to load mpv's playlist, which is the same scan a click on
-        # an unlisted file already does.
+        # file of the last folder every single time. The first click loads
+        # mpv's playlist from the list already on screen (see play()); it is
+        # not a rescan, so rows removed before that click stay removed.
         last = settings.last_folder()
         if last and Path(last).is_dir():
             window.open_folder(Path(last), reload_player=False)
