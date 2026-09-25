@@ -243,6 +243,22 @@ class _ScanSignals(QObject):
     done = Signal(str, list, str, bool)
 
 
+def _reveal(video: Path) -> None:
+    """Select the file in Explorer. Blocks on the share, so never on the UI thread."""
+    # A missing file is skipped rather than handed over: explorer /select on a
+    # path that is not there opens the user's Documents folder instead.
+    if not video.exists():
+        return
+    # One pre-built command line rather than an argument list: explorer
+    # parses its own, and /select has to stay glued to the path by that
+    # comma -- list2cmdline would quote the pair as a single token and
+    # explorer opens the user's Documents folder instead.
+    try:
+        subprocess.Popen(f'explorer /select,"{video}"')
+    except OSError:
+        debug_log.log_exc(f"reveal_in_explorer: {video}")
+
+
 class _RestoreSignals(QObject):
     # the last library, resolved -- emitted only once it is known to exist
     found = Signal(str)
@@ -930,17 +946,13 @@ class AXPlayerWindow(QWidget):
         self.sidebar.set_watched(paths, watched)
 
     def reveal_in_explorer(self, path: str) -> None:
-        video = Path(path)
-        if not video.exists():
-            return
-        # One pre-built command line rather than an argument list: explorer
-        # parses its own, and /select has to stay glued to the path by that
-        # comma -- list2cmdline would quote the pair as a single token and
-        # explorer opens the user's Documents folder instead.
-        try:
-            subprocess.Popen(f'explorer /select,"{video}"')
-        except OSError:
-            debug_log.log_exc(f"reveal_in_explorer: {video}")
+        # Off the UI thread: the exists() check touches the file's share, and
+        # with a NAS that has gone to sleep since the folder was listed that
+        # is 21 s of a frozen window (see _find_library). Explorer itself may
+        # well wait on the share too, but in its own process.
+        threading.Thread(
+            target=_reveal, args=(Path(path),), name="ax-reveal", daemon=True
+        ).start()
 
     def toggle_always_on_top(self) -> None:
         self._set_always_on_top(not self._on_top)

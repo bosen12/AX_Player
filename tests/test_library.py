@@ -1091,3 +1091,50 @@ def test_playing_a_listed_row_does_not_touch_the_share(monkeypatch):
 
     AXPlayerWindow.play(w, Path("relative.mp4"))
     assert resolved, "control: an unlisted, relative path is still resolved"
+
+
+def test_reveal_hands_explorer_one_glued_command_line(tmp_path, monkeypatch):
+    """explorer parses its own command line, and /select has to stay glued to
+    the path by the comma. An argument list goes through list2cmdline, which
+    quotes the pair as one token -- and explorer then opens Documents."""
+    from ax_player import app as app_mod
+
+    video = tmp_path / "第1話 ep.mkv"
+    video.write_bytes(b"")
+    launched = []
+    monkeypatch.setattr(app_mod.subprocess, "Popen", lambda cmd, *a, **kw: launched.append(cmd))
+
+    app_mod._reveal(video)
+    assert launched == [f'explorer /select,"{video}"'], launched
+
+    launched.clear()
+    app_mod._reveal(tmp_path / "gone.mkv")
+    assert launched == [], "a missing file would open Documents instead"
+
+
+def test_reveal_does_not_block_the_ui_thread(monkeypatch):
+    """exists() on a share that has gone to sleep is 21 s; it must not be the
+    window's 21 s."""
+    import threading
+    import time
+
+    from ax_player import app as app_mod
+
+    release = threading.Event()
+    ran_on = []
+
+    def slow_reveal(video):
+        ran_on.append(threading.current_thread())
+        release.wait(5)
+
+    monkeypatch.setattr(app_mod, "_reveal", slow_reveal)
+    started = time.perf_counter()
+    AXPlayerWindow.reveal_in_explorer(None, "C:/nas/ep.mkv")
+    took = time.perf_counter() - started
+    release.set()
+    deadline = time.monotonic() + 5
+    while not ran_on and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert took < 0.5, f"reveal_in_explorer held the UI thread for {took:.2f}s"
+    assert ran_on and ran_on[0] is not threading.main_thread()
