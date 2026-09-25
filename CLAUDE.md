@@ -68,6 +68,14 @@ build breaks. `tests/test_bundle_contents.py` derives from the source, so
 importing a new `PySide6.QtX` module that the spec drops goes red there first
 — take it out of `UNUSED_QT`, don't work around the test.
 
+Redirecting `LOCALAPPDATA` isolates AX's own data (settings, resume, caches)
+but **not mpv's**: libmpv finds `%LOCALAPPDATA%\mpv` through the Windows
+Known Folder API, not the environment variable, and `C:\mpv\mpv.conf` sets
+`save-position-on-quit`. Any probe that plays real files through libmpv
+writes the owner's `watch_later` — and a second run then resumes where the
+first one quit, which looks like a playback bug. Delete only the entries
+whose MD5-of-path matches paths the probe played (HANDOFF §9.58).
+
 Smoke-testing a **onefile** build: close it with `CloseMainWindow()` or stop
 only the child process. Killing the bootloader parent (`Stop-Process -Force`
 on every `AXPlayer`) skips its cleanup and leaves a ~150 MB `_MEI*` directory

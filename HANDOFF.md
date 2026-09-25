@@ -2817,3 +2817,89 @@ v1.3.10   19.07 s   視窗在畫面上「沒有回應」，之後顯示空側欄
 逐一判讀了 `app.py`、`ui.py`、`dnd.py` 裡每一個檔案系統呼叫：掃描與排序在背景執行緒；縮圖快取與 mpv root 在本機；拖放與命令列參數的路徑剛從檔案總管來，那一刻分享一定有回應。FM 沒有這個形狀：它碰的是 mpv 設定目錄（本機），而且在 tick 的背景執行緒或 pywebview 的 bridge 執行緒上。
 
 `_on_library_found` 呼叫 `open_folder()` 時仍會 `resolve()` 一次——背景剛確認過分享有回應，連線是熱的；只有「確認後的幾毫秒內剛好斷線」才會卡住。沒有為這個再加參數。
+
+### 9.58 09-26：外部字串在 Qt 這一側；以及 AX 終於有 CI
+
+#### 標題列把影片中繼資料裡的 HTML 當成排版來畫
+
+FM 的網頁介面有一條規則：「外部字串一律當敵意」——`media-title` 是唯一需要變成標記的字串，所以 escape。這一輪問它在 **Qt 這一側**成不成立。
+
+AX 的標題列顯示的是 mpv 的 `media-title`（容器自己的中繼資料，或串流遠端給的標題），而那個 `QLabel` 沒有設 `textFormat`，預設 `AutoText`：Qt 覺得像標記的就當標記渲染。用真的 `TitleBar.set_title`（`title_changed` 接上的那個 slot）量：
+
+```
+Plain Episode 01                  純文字          高度 12
+Top 10 <b>moments</b> ...         標籤被吞、字變粗   14
+<font size=7>BIG</font> title     BIG title        34
+Tom &amp; Jerry &lt;3             Tom & Jerry <3   14   （與實際標題不同）
+Clip <img src=nope.png> end       Clip ￼ end       16   （並嘗試讀本機的 nope.png）
+```
+
+不是安全問題：Qt 不執行腳本，QLabel 也不抓網路圖片。是**標題列會顯示錯的東西**；省略號還是用含標籤的原始字串量寬度的。改成 `PlainText`。預覽框的完整檔名與側欄的資料夾名一併改——Windows 名稱不能含 `<`，但**可以含 `&amp;`**，而 Qt 的判斷連實體都算。
+
+查過、不受影響：選單文字全是寫死的（`&` 快捷鍵標記的問題不成立）；下載失敗對話框第一行是固定中文（`mightBeRichText` 只看第一行）。
+
+**探針自己先壞了兩次**：先用 `dir()` 模糊比對找類別，撈到一個整數；再以為 `mightBeRichText` 在 `QtCore.Qt`，其實在 `QtGui.Qt`。兩次都是在探針把結論印出來之前就炸掉，沒有造成誤判——但這正是為什麼探針要寫到會印出「它看到了什麼」，而不只是一個布林值。
+
+測試釘的是後果：`<font size=7>` 不可改變標籤要求的高度，三個 label 都是 `PlainText`。三個突變各自只打紅一題。
+
+#### AX 的 CI
+
+FM 從一開始就有 GitHub Actions；AX 的測試一直只在這台機器上跑。新的 workflow 與 FM 相同，多兩點：
+
+- **3.10 與 3.14 都跑**。CLAUDE.md 的規矩是兩個都要綠，而 3.14 是出貨用的。
+- **先跑 `setup_mpv.py`**：`libmpv-2.dll` 是 gitignore 的，而 python-mpv 沒有它連 import 都不行——suite 會在收集階段就死。下載結果以 `mpv_fetch.py` 的雜湊為鍵快取。
+
+推送前在本機完整模擬：全新 `git clone` → `setup_mpv.py` 真的下載 → 整個 suite，3.10 與 3.14 都是 194 passed。**並且確認 clone 裡 import 的是 clone 自己的 `ax_player`**——若有可編輯安裝指回工作目錄，那次模擬量的就是我的工作副本。
+
+這次模擬也回答了一個之前沒人問過的問題：suite 在乾淨的 clone 上會不會過，還是依賴了只存在某個工作目錄裡的東西。
+
+#### ★ 然後 CI 的第一次實跑是紅的——而且抓到的是真 bug
+
+3.10 與 3.14 都在「Fetch mpv」紅：`failed: 'charmap' codec can't encode characters in position 0-3`。
+
+`setup_mpv.py` 把 `print` 當成進度回報傳給下載器，進度訊息是中文。CI 的 stdout 是管道、cp1252，印不出中文 → `UnicodeEncodeError` 從進度回報裡丟出 → `setup_mpv` 把它當成下載失敗、exit 1。**一行印不出來的進度訊息，讓真正的下載失敗了。**
+
+我的本機模擬是綠的，因為**模擬的是機器，不是 CI 的主控台**：這台是 cp950，中文印得出來。§9.53 在 FM 撞到的 cp1252 是同一族——那一次也是 CI 抓到、本機看不到。**教訓：在 zh-TW 機器上模擬 CI，必須連 `PYTHONIOENCODING=cp1252` 一起模擬。**
+
+修法：`main()` 一開頭把 stdout/stderr 設成 `errors="backslashreplace"`。在 clone 裡、cp1252 管道下真的下載一次：進度印成 `下載中…`、exit 0。回歸測試用子行程跑真正的 `setup_mpv.main()`，拿掉修正就重現出與 CI 一字不差的那行錯誤。整個 suite 另外以 `PYTHONIOENCODING=cp1252` 跑一次，全綠。
+
+受影響的不只 CI：任何非 CJK 代碼頁的機器上把 `setup_mpv.py` 的輸出導到管道或檔案。互動式主控台走 WindowsConsoleIO，不受影響——所以 `run.bat` 的使用者一直沒事。
+
+#### ★★ 第二個被 CI 抓到的：§9.57 我自己的修正，在某些環境會靜靜失效
+
+cp1252 修好之後，3.10 那條紅在 §9.57 新寫的 `test_restoring_the_library_does_not_block_the_calling_thread`：背景執行緒有跑，但它發的 Qt 訊號沒有送到。本機同樣 Python 3.10.11 + PySide6 6.11.2，**單獨 40 次、整個 suite 8 次、offscreen/minimal/windows 三種平台，全過**。
+
+我先做了一個錯的判斷：以為是測試的接收者（`SimpleNamespace`）不像正式程式碼（QObject），改成 QObject——結果**兩個直譯器都紅了**。那個修改在沒有證據的情況下改了東西，而資料立刻否定了它。
+
+接著做了該先做的事：**在 CI 上量**。讓測試在失敗時報告 emit 是否被呼叫、是否丟例外、執行緒是否還活著。答案：
+
+```
+emits=[('emitted', 'ax-restore-library')]  worker_still_alive=False
+```
+
+`emit()` 正常返回、沒有例外、執行緒已結束——**排進 UI 執行緒的呼叫就是沒有被執行**。含這條測試的 6 個 CI 工作失敗 4 次。
+
+根因**未證實**。有依據的推論：從 Qt 沒啟動過、而且**只發射一次**的外來執行緒發訊號，是最少被走過的路；python-mpv 的事件執行緒也是外來的，但它持續發射，第一次丟了看不出來。**這不只是測試的問題**——正式程式碼的還原路徑用的正是這個機制，遺失時啟動後片庫就是不回來，而且日誌裡什麼都沒有。
+
+改成背景執行緒**完全不碰 Qt**：只把答案 append 進 list，UI 執行緒上的 `QTimer` 每 50 ms 看一次。新增 AST 測試：那個執行緒不可再呼叫 `emit` 或 `_emit_safely`。
+
+**一次綠燈不算證據**——舊版在 CI 上大約三分之一會過。同一個 commit 在 CI 上跑了 3 次：**6 個工作全綠**（修正前 6 個工作失敗 4 次；以舊的失敗率連過 6 次的機率不到 1%）。真的 `main()` 上：存在的片庫照常還原，不回應的 NAS 下事件迴圈 0.64 秒就開始跑。
+
+順帶修掉讓這件事查不出來的另一半：**`_emit_safely` 原本對任何 `RuntimeError` 都 `pass`**，不只是它文件裡的那一種（視窗關閉後的「Signal source has been deleted」）。任何其他的發射失敗都與「視窗已經關了」長得一模一樣。現在已知的那一種照舊安靜，其他的寫進 debug.log。
+
+全套件掃過：AX 裡只剩兩條 Python 執行緒（還原、在檔案總管中顯示），兩條都不碰 Qt；其他背景工作都是 QThreadPool 或 QThread——Qt 自己啟動的執行緒。
+
+**這一段的教訓，三條：**
+1. **「本機 48 次全過」不是證據，只是本機的證據。** 沒有 CI 的話，這個修正會帶著一個 4/6 機率的靜默失效出貨。今晚加 CI 的價值，在它的第一個小時就兌現了兩次。
+2. **沒有資料就改東西，會被資料否定。** 把接收者改成 QObject 是猜的；在 CI 上加診斷是量的。後者一次就給出答案。
+3. **一個寬到能保護程式的例外處理器，必須對「預期之外的例外」出聲。** 查這件事時第一個要排除的，就是 `_emit_safely` 有沒有把例外吞掉——而它的寬度讓這個可能性存在、又無從排除，只能在測試裡另外包一層去量。這次資料顯示它沒有吞（emit 正常返回），但那是量了才知道的。§9.49 形狀的又一個實例。
+
+#### 凍結版候選重驗，以及一個「看起來像播放 bug」的測試污染
+
+重建 AX 候選（HEAD `d18fff2`）重跑凍結版檢查：NAS 啟動時 UI 執行緒 2.00 秒就能回應；還原路徑產生 10 個縮圖、載入的 PySide6 模組 12 個。但播放路徑那一行是 `ep1 pos=0.0 watched=true`——一個 20 秒的片段 10 秒就「看完」。
+
+**對照組先跑**：同一個腳本對部署中的 v1.3.10 各跑兩次，結果一模一樣（第 1 次停在 9 秒左右、第 2 次被標成看完）。所以不是改動造成的。那個規律揭露了原因：每次測試都是全新的導向 `LOCALAPPDATA`，**但 libmpv 找 `%LOCALAPPDATA%\mpv` 用的是 Windows 的 Known Folder API，不看環境變數**；而 `C:\mpv\mpv.conf` 開了 `save-position-on-quit`。第 1 次結束時 mpv 把位置寫進擁有者**真實的** `watch_later`，第 2 次就從那裡接著播。
+
+今晚那個目錄被寫了 15 個檔。檔名是路徑的 MD5，所以用我播過的路徑反算：14 個對得上。**只刪了 8 個**——`Temp\claude` 以下只有測試會用到的那些；另外 6 個是 `C:`、`C:\Users`……`Temp` 這些共用上層目錄的轉址，擁有者自己在個人資料夾下播任何東西都會寫，今晚只是更新了時間戳，不動。1 個對不上的也不動。
+
+CLAUDE.md 補上這條：導向 `LOCALAPPDATA` 只隔離 AX 自己的資料，不隔離 mpv 的。
