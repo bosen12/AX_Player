@@ -2695,3 +2695,72 @@ GitHub 資產 digest                 兩個都 == 本地 sha256
                                    release\FluidMotion.exe 仍是 v1.6.10(e6b45736…),本輪不動
 殘留行程                            AXPlayer / mpv 0 個
 ```
+
+### 9.56 09-26：打包層第二輪——出貨的東西裡有一半從不被載入 ★
+
+§9.55 留了一條線：onedir 裡有 numpy 的 OpenBLAS。§9.20 查過「`datas` 有沒有漏」，沒有查過「多了什麼」。這一輪只問一件事：**打包進去的東西，執行中的程式到底載入了哪些？**
+
+#### 方法：讀行程的模組清單，不猜名字
+
+1. **誰把它帶進來**：PyInstaller 自己的 `xref-*.html` 記著每個模組被誰 import；Qt 的 DLL 用 `pefile` 讀匯入表。
+2. **它有沒有被用到**：讓打包版走一個真實 session（AX：開資料夾、掃描、播放並自動接下一集、產生縮圖與預覽圖；FM：一般啟動與 `--start-hidden`），從 `Process.Modules` 讀出實際載入的原生模組。
+3. **排除之後**：同一個 session 重跑，載入集合必須完全相同；留下的每個二進位檔的匯入表必須全部可解析。
+
+#### 找到的四條鏈
+
+| 鏈 | 誰帶進來 | 大小（原始） |
+|---|---|---|
+| numpy（+ psutil、yaml、charset_normalizer） | python-mpv 在 `screenshot_raw` 裡 lazy import PIL → `PIL._typing` 在 `if TYPE_CHECKING:` 底下 import numpy。靜態分析兩者都照收 | AX 39.5 MB（含 PIL） |
+| Qt：VirtualKeyboard → Quick → Qml/QmlModels/OpenGL/Network | `platforminputcontexts/qtvirtualkeyboardplugin.dll`。spec 早就排除了 QtQuick 的 **Python 模組**，DLL 照樣進來 | 約 20 MB |
+| Qt：`opengl32sw.dll`、Pdf、Network、Svg、`qdirect2d` | `opengl32sw` 沒有任何依賴者，是 hook 自己放的；`qpdf` 外掛帶 Qt6Pdf | 約 24 MB |
+| FM：cryptography、PIL 的 `_avif`/`_imagingft`/`_webp`/`_imagingcms` | pywebview 只在 `ssl=True` 的函式裡 import；Pillow 對四個編解碼器都是 `try/except ImportError` | 約 19.5 MB |
+
+**這台機器的建置環境是兩個專案共用的 3.14 site-packages**，所以 AX 撿到 FM 用的東西、FM 撿到 AX 環境裡的 numpy。這是它們出現的根本原因。
+
+#### 結果
+
+```
+AX onefile   66.9 MB -> 48.7（去 PIL/numpy）-> 30.3 MB（再裁 Qt）     -55%
+             啟動到視窗 2044 -> 1835 -> 1638 ms（每組 6 次、順序輪替）   -406 ms
+AX onedir    165 MB / 316 檔 -> 72.3 MB / 240 檔；啟動 1059 ms（onefile 1528 ms）
+FM onefile   38.1 MB -> 27.2（去 numpy）-> 17.8 MB（再去 cryptography 與編解碼器） -53%
+             啟動到視窗 1387 -> 1138 ms（兩組區間不重疊）               -250 ms
+```
+
+FM 只去 numpy 那一階段量到差 47 ms、在雜訊內——那時沒有宣稱變快，第二階段才是真的。
+
+**保留的，一律是量到有載入的**：AX 的 Qt6Core/Gui/Widgets、`qwindows`、`qmodernwindowsstyle`、`qgif`/`qicns`/`qico`/`qjpeg`；FM 的 PIL `_imaging`/`_imagingmath`、`cffi`（clr_loader 要用）、WebView2 與 pythonnet 的東西。沒量過的小型圖片外掛與 Qt 翻譯檔也不動。
+
+驗證：
+- AX 裁剪前後同一個 session：載入模組 **32 = 32，零差異**；播放前進並接到下一集、產生 10 個快取檔、零 Python 錯誤、零 Qt 外掛警告。留下的 51 個二進位檔匯入表全部可解析。
+- FM 與 v1.6.10 對照：一般啟動都出現 WebView2 視窗（CLR 與 cffi 已載入）、`--start-hidden` 都藏進托盤、關鍵原生模組相同、日誌零錯誤。
+- **舊版 FM 行程裡從沒載入過任何 numpy DLL**——它被打包、每次啟動都被解壓，卻從沒被用過。
+
+#### 測試：排除模組最糟的失效方式
+
+原始碼環境裡模組都在，所以 checkout 與 suite 全部正常，**只有打包版會在 import 時死掉**。所以測試釘的是讓排除安全的前提，不只是排除本身：
+
+- **推導自 spec**：每個被排除的模組都不可被自家程式 import，函式內的 lazy import 也算。
+- **推導自原始碼**（AX）：任何 `PySide6.QtX` 的 import 讓它的 `.pyd` 與 `Qt6X.dll` 變成不可丟。
+- **量到的載入集合**（AX）：`LOADED_IN_A_REAL_SESSION` 與 `UNUSED_QT` 不可重疊，也用反斜線路徑驗一次——其他測試都寫 `/`，拿掉分隔符號正規化的話，真正的建置一個都丟不掉、測試卻全綠。
+- **過濾有接上**（§9.39）：spec 必須真的用 `_unused_qt` 重新指定 `a.binaries` 與 `a.datas`。測試執行的是從 spec 取出的**真正的** `UNUSED_QT` 與 `_unused_qt`。
+- **第三方前提**：python-mpv 的 PIL、pywebview 的 cryptography 必須一直待在函式裡。用 `find_spec` 定位、不執行模組；突變用 `PYTHONPATH` 放假套件，不碰 site-packages。
+- **執行期**（FM）：子行程裡把 spec 的**每一個**排除項設成 `sys.modules[name] = None`（等同打包版），跑真正的 `ensure_icon()`、`Image.init()`、`Image.open`、ICO 序列化、`import webview`。`tray()` 把 `ImportError` 當成「沒有托盤」靜靜 return——PIL 壞了不會當掉任何東西，**托盤圖示就是不出現**。
+
+突變：AX 7 個、FM 9 個，全數照設計被抓到。兩個特別設計的：用 `__import__("num" + "py")` 繞過 AST，證明執行期那條不是靜態那條的重複（只有它紅）；以及一次突變因樣式出現 4 次被工具拒絕——那次的「全綠」量的是未突變的程式，換唯一錨點重做才算數。
+
+#### 這一輪自己的錯，四個
+
+1. **量測工具壞了而我沒先驗它**（§5.2 又一次）。把 exe 改名成 `A_v1.3.10.exe` 做 A/B，行程名稱就不再是 `AXPlayer`，腳本用 `Get-Process AXPlayer` 永遠找不到視窗：每次等滿 40 秒、關不到任何東西，**開了 24 個行程沒關**，數字全部作廢。重做時改成「找不到視窗就中止、不記錄」。
+2. **`_MEI` 殘留**：前幾輪（包括我）的冒煙測試都用 `Stop-Process -Force` 殺掉每一個 `AXPlayer`，連 bootloader 父行程一起殺，它就沒機會清理——每次在 `%TEMP%` 留約 150 MB。今天清點：99 個 `_MEI*` 目錄、377 MB，其中兩個是我這輪的（已刪），一個 74 MB 的是 09-23 FM 那輪的（**沒刪，不是我建的**）。正確作法：`CloseMainWindow()`，或只結束擁有視窗的子行程。兩份 CLAUDE.md 都寫進去了。
+3. **兩次 commit 訊息的測試數寫錯**：FM `60cb270` 寫「342 -> 345」，實際 373 -> 376；AX `aec7667` 寫「180 -> 185」，實際 180 -> 184。已推送，不為數字改寫歷史，以這裡為準。教訓：數字寫進訊息之前先看輸出。
+4. **heredoc 又吃了反斜線**：用 Python 產生測試原始碼、經過 bash heredoc，三個 `"\n"` 變成真正的換行。CLAUDE.md 明寫要用 Write/Edit。
+
+#### 留給擁有者的兩件事（沒有動）
+
+- **`%LOCALAPPDATA%\AXPlayer\settings.ini` 的 `last_folder` 指向另一個 Claude session 的 scratchpad**（`9157f4e5-…\scratchpad`）。某一輪的端到端測試帶著真實的 `LOCALAPPDATA` 開過資料夾、沒有還原。從日誌找不回原本的片庫路徑（開資料夾不記錄），所以沒有猜著改——早上開 AX 若看到陌生的資料夾，重新開一次你的片庫即可。這一輪所有用到真實 `LOCALAPPDATA` 的測試都先備份、事後雜湊比對還原。
+- `%TEMP%` 裡 09-23 的 FM `_MEI0000e5802`（74 MB）可以刪，確認沒有 FluidMotion 在跑即可。
+
+#### 尚未發布
+
+AX 與 FM 的裁剪都已提交推送，但**沒有發版、沒有替換部署複本**——那是對外動作，等擁有者確認。發版前照例要重建、在出貨的 exe 上重跑這一節的驗證。
