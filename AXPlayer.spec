@@ -45,6 +45,18 @@ excludes = [
     "PySide6.QtQuickWidgets",
     "PySide6.QtQml",
     "PySide6.QtPositioning",
+    # python-mpv imports PIL inside two methods this app never calls
+    # (MPV.screenshot_raw and ImageOverlay.update), and PyInstaller's static
+    # analysis follows imports into function bodies. PIL._typing then imports
+    # numpy under `if TYPE_CHECKING:` -- also followed -- and numpy's own
+    # submodules drag in psutil (numpy.testing), yaml (numpy.__config__) and
+    # charset_normalizer (numpy.f2py). None of it is imported at runtime and
+    # none of it is in requirements.txt; it was only here because the build
+    # interpreter's site-packages is shared with Fluid Motion. Measured in the
+    # v1.3.10 onedir: 39.5 MB of 165 MB (24%), numpy 27.5 and PIL 11.2 of it.
+    # Excluding the two roots drops the whole chain. HANDOFF §9.56.
+    "PIL",
+    "numpy",
 ]
 
 a = Analysis(
