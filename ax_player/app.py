@@ -119,8 +119,15 @@ def _emit_safely(signal, *args) -> None:
     """
     try:
         signal.emit(*args)
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:
+        # Quiet only for the case above. Every RuntimeError used to pass
+        # here, so any other failure to deliver -- a thread whose emission
+        # never lands, whatever PySide raises next -- looked exactly like a
+        # window that had simply closed: no result and no trace (HANDOFF 9.49's
+        # shape). The one expected message stays silent; anything else is
+        # written down.
+        if "has been deleted" not in str(exc):
+            debug_log.log_exc("signal emit failed")
 
 
 class _JobSignals(QObject):

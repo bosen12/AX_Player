@@ -988,6 +988,22 @@ def test_restoring_the_library_does_not_block_the_calling_thread(qapp, tmp_path,
 
     window = Window()
 
+    # What happened to the answer, if it never arrives. On CI it did not, on
+    # both interpreters, while 48 local runs delivered it every time -- so the
+    # failure message has to say whether the emit ran, raised, or went nowhere.
+    emits = []
+    real_emit_safely = app_mod._emit_safely
+
+    def recording_emit_safely(signal, *args):
+        try:
+            signal.emit(*args)
+            emits.append(("emitted", threading.current_thread().name))
+        except Exception as exc:  # noqa: BLE001 -- recorded, then handed on
+            emits.append(("raised", repr(exc)))
+            real_emit_safely(signal, *args)
+
+    monkeypatch.setattr(app_mod, "_emit_safely", recording_emit_safely)
+
     started = time.perf_counter()
     AXPlayerWindow.restore_library(window, "any")
     returned_after = time.perf_counter() - started
@@ -999,8 +1015,10 @@ def test_restoring_the_library_does_not_block_the_calling_thread(qapp, tmp_path,
         qapp.processEvents()
         time.sleep(0.01)
 
+    workers = [t.name for t in threading.enumerate() if t.name == "ax-restore-library"]
     assert asked_on and asked_on[0] is not threading.main_thread(), "the share was asked on the UI thread"
     assert opened == [(Path(tmp_path), {"reload_player": False})], (
+        f"emits={emits} worker_still_alive={bool(workers)} "
         "a found library must be listed without being handed to mpv"
     )
 
@@ -1154,3 +1172,27 @@ def test_reveal_does_not_block_the_ui_thread(monkeypatch):
 
     assert took < 0.5, f"reveal_in_explorer held the UI thread for {took:.2f}s"
     assert ran_on and ran_on[0] is not threading.main_thread()
+
+
+def test_emit_safely_is_quiet_only_about_a_closed_window():
+    """It swallows RuntimeError so a job finishing after the window closed does
+    not raise out of run(). It used to swallow *every* RuntimeError, so any
+    other failure to deliver a result looked identical to that: nothing
+    happened, and nothing said so."""
+    from ax_player import app as app_mod
+    from ax_player import debug_log
+
+    class Raising:
+        def __init__(self, message):
+            self.message = message
+
+        def emit(self, *args):
+            raise RuntimeError(self.message)
+
+    app_mod._emit_safely(Raising("Signal source has been deleted"), "x")
+    before = debug_log.path().read_text(encoding="utf-8", errors="replace") if debug_log.path().exists() else ""
+    assert "signal emit failed" not in before, "the expected close-time case must stay quiet"
+
+    app_mod._emit_safely(Raising("something PySide has never said before"), "x")
+    after = debug_log.path().read_text(encoding="utf-8", errors="replace")
+    assert "signal emit failed" in after and "something PySide has never said before" in after
