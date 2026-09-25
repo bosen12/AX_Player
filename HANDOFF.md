@@ -2659,3 +2659,39 @@ v1.3.9   ep1 ep2 ep3 ep4 ep5      ep1 ep2 ep3 ep4 ep5         ep4
 #### 這一輪的教訓
 
 **「提交之前先問對方有沒有接受」的前提,是對方有機會拒絕。**`e2e67c6` 的原則是對的,錯在把「沒有被問到」算進了「被拒絕」。而把兩者分開的那個假物件,恰好也沒有分開。
+
+### 9.55 09-26:發 AX v1.3.10
+
+`git diff v1.3.9..v1.3.10 -- ax_player` 只有 §9.54 的兩個檔。FM 這一輪沒有產品碼變更,不發。
+
+#### 發版檔自己問出來的一件事:onedir zip 小了 1.72 MB
+
+onefile 與 v1.3.9 只差 1,660 bytes,但 onedir zip 從 68,918,465 掉到 67,197,150。§9.52 的膨脹就是從發版檔看出來的,所以出貨前先查。部署中的 `release\AXPlayer-onedir.zip` 與 GitHub 上 v1.3.9 資產的 digest 相同,直接拿它逐項比:
+
+```
+檔案數         316 vs 316,檔名完全相同
+原始位元組     164,992,600 vs 164,993,350   (+750,只有 AXPlayer.exe —— 包進去的程式碼)
+壓縮後         68,856,963 vs 67,135,648
+壓縮方式       兩邊都是 deflate
+最大單檔差     opengl32sw.dll +287 KB、Qt6Gui.dll +168 KB ……
+```
+
+**內容等價,差的全是壓縮率**——上一版的 zip 壓得比較鬆(不同的壓縮工具或等級)。不是缺漏。
+
+順帶記一個**沒追、也不在這一輪範圍內**的觀察:onedir 裡有 `libscipy_openblas64_*.dll`。那是 numpy 2.x wheel 自帶的 OpenBLAS(名字來自 scipy-openblas 專案,不代表有 scipy),v1.3.9 也有。AX 是否真的需要 numpy,留給打包層那一條線(§9.20)去問,**先量再說它是不是死重**。
+
+#### 驗證鏈
+
+```
+四個 suite                         AX 176 × 3.10 / 3.14(Deprecation 視為錯誤)
+建置                               Python 3.14.6 / PyInstaller 6.22.2,Analysis 的 codex 路徑 0
+修正在出貨的 exe 裡(對照組)        從 PYZ 取出 remove_paths 直接執行,空鏡像下:
+                                     部署中的 v1.3.9 → []          (列保留,什麼都沒發生)
+                                     dist 的 v1.3.10 → [ep2.mkv]   (列被移除)
+                                   play() 是否在未命中時呼叫 load_playlist:v1.3.9 False / v1.3.10 True
+煙霧測試                            onefile、onedir、部署後的 onefile 都開出 "AX Player" 視窗
+GitHub 資產 digest                 兩個都 == 本地 sha256
+發行複本                            onefile / onedir / release 的兩個資產 SHA256 全部 MATCH,onedir 316 vs 316
+                                   release\FluidMotion.exe 仍是 v1.6.10(e6b45736…),本輪不動
+殘留行程                            AXPlayer / mpv 0 個
+```
