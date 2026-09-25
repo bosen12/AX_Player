@@ -964,13 +964,29 @@ def test_restoring_the_library_does_not_block_the_calling_thread(qapp, tmp_path,
 
     monkeypatch.setattr(app_mod, "_find_library", slow_share)
     opened = []
-    window = types.SimpleNamespace(
-        _folder=None,
-        _restore_signals=app_mod._RestoreSignals(),
-        open_folder=lambda folder, **kw: opened.append((folder, kw)),
-    )
-    window._on_library_found = types.MethodType(AXPlayerWindow._on_library_found, window)
-    window._restore_signals.found.connect(window._on_library_found)
+
+    # A QObject living on this (the UI) thread, borrowing the real slot --
+    # because that is what receives the signal in the app: AXPlayerWindow is a
+    # QObject, so the answer is queued to its thread. The first version used a
+    # SimpleNamespace here, and on CI (windows-latest, 3.10) the queued call
+    # never arrived within 5 s: 0 of 48 local runs reproduced it, and PySide6
+    # routes a non-QObject callable through a hidden receiver whose thread is
+    # its own business. Testing the shape the app actually has.
+    from PySide6.QtCore import QObject
+
+    class Window(QObject):
+        _on_library_found = AXPlayerWindow._on_library_found
+
+        def __init__(self):
+            super().__init__()
+            self._folder = None
+            self._restore_signals = app_mod._RestoreSignals(self)
+            self._restore_signals.found.connect(self._on_library_found)
+
+        def open_folder(self, folder, **kw):
+            opened.append((folder, kw))
+
+    window = Window()
 
     started = time.perf_counter()
     AXPlayerWindow.restore_library(window, "any")

@@ -36,5 +36,8 @@ jobs:
           key: mpv-binaries-${{ hashFiles('ax_player/mpv_fetch.py') }}
       - name: Fetch mpv
         run: python setup_mpv.py
+      # --durations: a test that waits on a thread or a queued signal is the
+      # first thing to go on a slower runner, and a timing failure with no
+      # timings attached cannot be told apart from a real one.
       - name: Test
-        run: python -m pytest tests -q
+        run: python -m pytest tests -q --durations=15
