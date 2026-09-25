@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import traceback
 from pathlib import Path
 
@@ -242,6 +243,32 @@ class _ScanSignals(QObject):
     done = Signal(str, list, str, bool)
 
 
+class _RestoreSignals(QObject):
+    # the last library, resolved -- emitted only once it is known to exist
+    found = Signal(str)
+
+
+def _find_library(folder: str) -> str | None:
+    """The last library's resolved path if it is still there, else None.
+
+    Blocks for as long as the filesystem does, so it must not run on the UI
+    thread. A library on a NAS that is switched off is the case that matters:
+    measured against an address that does not answer, the first call that
+    touches the share -- is_dir() or resolve(), whichever comes first -- took
+    21.0 s before failing. main() used to make that call between window.show()
+    and app.exec(), so every launch with the NAS off put a window on screen
+    that stayed unpainted and "Not Responding" for those 21 seconds, and then
+    showed an empty sidebar.
+    """
+    try:
+        path = Path(folder)
+        if not path.is_dir():
+            return None
+        return str(path.resolve())
+    except OSError:
+        return None
+
+
 class _ScanJob(QRunnable):
     """Directory scan + sort runs here instead of the UI thread -- a folder
     with thousands of files (or a recursive scan) would otherwise freeze
@@ -412,6 +439,8 @@ class AXPlayerWindow(QWidget):
         self._scan_pool.setMaxThreadCount(1)
         self._scan_signals = _ScanSignals(self)
         self._scan_signals.done.connect(self._on_folder_scanned)
+        self._restore_signals = _RestoreSignals(self)
+        self._restore_signals.found.connect(self._on_library_found)
 
         self._thumb_pool.start(_PruneCacheJob())
 
@@ -598,6 +627,36 @@ class AXPlayerWindow(QWidget):
         debug_log.log(f"pick_url: ok={ok} raw={url!r}")
         if ok and url.strip():
             self.play_url(url.strip())
+
+    def restore_library(self, folder: str) -> None:
+        """Reopen the last library once something off the UI thread has seen it.
+
+        Returns at once. The existence check and the resolve() open_folder()
+        would do both touch the share, and with the NAS off that is 21 s on
+        whichever thread asks -- see _find_library. Asked here, the window
+        paints and answers input while the question is outstanding.
+
+        A daemon thread, not the scan pool: that pool runs one job at a time,
+        so a folder the user opened during those 21 s would have queued behind
+        the timeout. And not a QThreadPool at all, because a pool drains on
+        destruction (HANDOFF 9.48): closing the app in that window would hide
+        it at once and then keep the process alive until the share timed out.
+        """
+
+        def ask() -> None:
+            found = _find_library(folder)
+            if found is not None:
+                _emit_safely(self._restore_signals.found, found)
+
+        threading.Thread(target=ask, name="ax-restore-library", daemon=True).start()
+
+    def _on_library_found(self, folder: str) -> None:
+        # Anything opened while the check was out -- a drop, the folder
+        # button -- is a newer request than "whatever was open last time".
+        # Never overwrite it.
+        if self._folder is not None:
+            return
+        self.open_folder(Path(folder), reload_player=False)
 
     def open_folder(
         self, folder: Path, select: Path | None = None, *, reload_player: bool = True
@@ -1225,9 +1284,14 @@ def main(argv: list[str] | None = None) -> int:
         # file of the last folder every single time. The first click loads
         # mpv's playlist from the list already on screen (see play()); it is
         # not a rescan, so rows removed before that click stay removed.
+        #
+        # Not `if Path(last).is_dir(): open_folder(...)` here: that runs before
+        # app.exec(), on the thread that paints the window, and with the
+        # library on a NAS that is switched off it blocked for 21 s on every
+        # launch. restore_library() asks off the UI thread.
         last = settings.last_folder()
-        if last and Path(last).is_dir():
-            window.open_folder(Path(last), reload_player=False)
+        if last:
+            window.restore_library(last)
 
     return app.exec()
 

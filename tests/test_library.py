@@ -924,3 +924,108 @@ def test_a_removed_row_stays_removed_through_the_first_click(qapp, tmp_path):
     assert handed == ["ep1.mkv", "ep3.mkv", "ep4.mkv", "ep5.mkv"]
     assert window.rescans == 1, "only the launch should have scanned"
     window.sidebar.deleteLater()
+
+
+# -- restoring the last library without freezing the window -----------------
+def test_find_library_answers_without_raising(tmp_path, monkeypatch):
+    from ax_player import app as app_mod
+
+    assert app_mod._find_library(str(tmp_path)) == str(tmp_path.resolve())
+    assert app_mod._find_library(str(tmp_path / "gone")) is None
+
+    def unreachable(self):
+        raise OSError(64, "The specified network name is no longer available")
+
+    monkeypatch.setattr(Path, "is_dir", unreachable)
+    assert app_mod._find_library(str(tmp_path)) is None
+
+
+def test_restoring_the_library_does_not_block_the_calling_thread(qapp, tmp_path, monkeypatch):
+    """With the library on a NAS that is off, the first call that touches the
+    share took 21 s. main() made that call on the UI thread before app.exec(),
+    so every such launch showed a window "Not Responding" for 21 seconds.
+
+    The fake below blocks until released, standing in for that timeout: the
+    call has to return while it is still blocked, and the question has to have
+    been asked on some other thread.
+    """
+    import threading
+    import time
+
+    from ax_player import app as app_mod
+
+    release = threading.Event()
+    asked_on = []
+
+    def slow_share(folder):
+        asked_on.append(threading.current_thread())
+        release.wait(5)
+        return str(tmp_path)
+
+    monkeypatch.setattr(app_mod, "_find_library", slow_share)
+    opened = []
+    window = types.SimpleNamespace(
+        _folder=None,
+        _restore_signals=app_mod._RestoreSignals(),
+        open_folder=lambda folder, **kw: opened.append((folder, kw)),
+    )
+    window._on_library_found = types.MethodType(AXPlayerWindow._on_library_found, window)
+    window._restore_signals.found.connect(window._on_library_found)
+
+    started = time.perf_counter()
+    AXPlayerWindow.restore_library(window, "any")
+    returned_after = time.perf_counter() - started
+    assert returned_after < 0.5, f"restore_library held its caller for {returned_after:.2f}s"
+
+    release.set()
+    deadline = time.monotonic() + 5
+    while not opened and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert asked_on and asked_on[0] is not threading.main_thread(), "the share was asked on the UI thread"
+    assert opened == [(Path(tmp_path), {"reload_player": False})], (
+        "a found library must be listed without being handed to mpv"
+    )
+
+
+def test_a_late_answer_does_not_replace_a_folder_opened_meanwhile():
+    """The check can take 21 s. Whatever the user opened in that time is the
+    newer request; the restore must not pull the window back to last time."""
+    opened = []
+    window = types.SimpleNamespace(
+        _folder=Path("C:/Newer"), open_folder=lambda folder, **kw: opened.append(folder)
+    )
+    AXPlayerWindow._on_library_found(window, "C:/Last")
+    assert opened == []
+
+
+def test_main_does_not_touch_the_library_path_on_the_ui_thread():
+    """The restore branch of main() runs before app.exec(): any filesystem
+    call there blocks the window for as long as the share takes to fail."""
+    import ast
+    import inspect
+
+    from ax_player import app as app_mod
+
+    tree = ast.parse(inspect.getsource(app_mod.main))
+    branches = [
+        node.orelse
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "targets"
+    ]
+    assert len(branches) == 1 and branches[0], "could not find main()'s restore branch"
+    restore = ast.Module(body=branches[0], type_ignores=[])
+
+    touched = [
+        node.func.attr
+        for node in ast.walk(restore)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"is_dir", "exists", "resolve", "is_file", "stat", "open_folder"}
+    ]
+    assert not touched, f"main()'s restore branch calls {touched} on the UI thread"
+    assert any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "restore_library"
+        for node in ast.walk(restore)
+    ), "main() no longer restores the last library at all"
