@@ -1029,3 +1029,65 @@ def test_main_does_not_touch_the_library_path_on_the_ui_thread():
         isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "restore_library"
         for node in ast.walk(restore)
     ), "main() no longer restores the last library at all"
+
+
+def test_relisting_the_open_folder_does_not_touch_the_share(tmp_path, monkeypatch):
+    """F5, a re-sort and 含子資料夾 all hand self._folder back to open_folder().
+    It was resolved when first opened; resolving it again is a no-op that
+    still goes to the share -- 21 s of a frozen window once a NAS has gone to
+    sleep. The scan that follows fails on a worker thread instead."""
+    canonical = tmp_path.resolve()
+    started = []
+    window = types.SimpleNamespace(
+        _folder=canonical,
+        _requested_thumbs=set(),
+        _recursive=False,
+        _sort_mode=settings.SORT_NAME,
+        _scan_signals=None,
+        _scan_pool=types.SimpleNamespace(start=lambda job: started.append(job)),
+    )
+    real_resolve = Path.resolve
+    resolved = []
+
+    def recording_resolve(self, *args, **kwargs):
+        resolved.append(self)
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", recording_resolve)
+
+    # Same folder, spelled in a different case: Windows paths compare equal.
+    AXPlayerWindow.open_folder(window, Path(str(canonical).upper()), reload_player=False)
+    assert resolved == [], "re-listing the open folder went back to the share"
+    assert str(window._folder) == str(canonical), "the canonical spelling was replaced"
+    assert len(started) == 1, "the re-list must still scan"
+
+    other = tmp_path / "other"
+    other.mkdir()
+    AXPlayerWindow.open_folder(window, other, reload_player=False)
+    assert resolved, "control: a folder that is not the open one is still resolved"
+
+
+def test_playing_a_listed_row_does_not_touch_the_share(monkeypatch):
+    """A listed row came out of a scan of a resolved folder. play() resolving
+    it again cost nothing locally and 21 s per click once the NAS dropped off."""
+    handed = []
+    w = _Window(ROOT, LISTED, recursive=True, mpv_holds=LISTED)
+    w.player.play_path = lambda v: (handed.append(v), v in w._holds)[1]
+
+    resolved = []
+    real_resolve = Path.resolve
+
+    def recording_resolve(self, *args, **kwargs):
+        resolved.append(self)
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", recording_resolve)
+
+    AXPlayerWindow.play(w, Path(str(SUB / "b.mp4").upper()))
+    assert resolved == [], "clicking a listed row went back to the share"
+    assert handed and str(handed[0]) == str(SUB / "b.mp4"), (
+        "mpv must be given the listed, canonical spelling"
+    )
+
+    AXPlayerWindow.play(w, Path("relative.mp4"))
+    assert resolved, "control: an unlisted, relative path is still resolved"

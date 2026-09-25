@@ -661,9 +661,10 @@ class AXPlayerWindow(QWidget):
     def open_folder(
         self, folder: Path, select: Path | None = None, *, reload_player: bool = True
     ) -> None:
-        # Resolved on the way in, because play() already resolves every file it
-        # is handed and the two have to agree. Two things went wrong while they
-        # did not:
+        # Resolved on the way in, because play() resolves every file it is
+        # handed that is not already listed -- and listed ones come out of this
+        # folder's own scan -- so the two have to agree. Two things went wrong
+        # while they did not:
         #
         # - A relative folder (run.bat passes %* straight through) reached
         #   _ScanJob unchanged, so _playlist held relative paths, so the m3u8
@@ -680,8 +681,15 @@ class AXPlayerWindow(QWidget):
         #   subdirectory -- the bug v1.1.6 closed, through a third door.
         #
         # A no-op for the paths that already arrive canonical, which is all of
-        # them from the file dialog, a drop, or Explorer.
-        folder = Path(folder).resolve()
+        # them from the file dialog, a drop, or Explorer -- a no-op that still
+        # touches the disk, though. Re-listing the folder already open (F5, a
+        # re-sort, 含子資料夾) hands self._folder straight back, resolved when
+        # it was first opened, so that one keeps its canonical spelling and
+        # skips the call: with a NAS that has gone to sleep since, resolve() is
+        # 21 s of a frozen window, where the scan it is about to start fails on
+        # a worker thread instead.
+        folder = Path(folder)
+        folder = self._folder if folder == self._folder else folder.resolve()
         self._folder = folder
         self._requested_thumbs.clear()
         settings.set_last_folder(str(folder))
@@ -819,7 +827,19 @@ class AXPlayerWindow(QWidget):
         self._thumb_pool.start(_ThumbJob(video, self._jobs))
 
     def play(self, video: Path) -> None:
-        video = Path(video).resolve()
+        # A listed row is used exactly as listed: it came out of a scan of a
+        # folder that was resolved when it was opened, so resolving it again
+        # changes nothing -- except that resolve() touches the share, and with
+        # a NAS that dropped off after the listing that is 21 s of a frozen
+        # window per click (see _find_library). The listed object rather than
+        # the argument, because Path equality ignores case on Windows and the
+        # listed spelling is the canonical one. Anything unlisted -- a relative
+        # path from run.bat, a file from elsewhere -- is still resolved.
+        video = Path(video)
+        if self._folder is not None and video in self._playlist:
+            video = self._playlist[self._playlist.index(video)]
+        else:
+            video = video.resolve()
         # Membership of the current playlist, not "is it a direct child of the
         # open folder". With 含子資料夾 on, every file under a subdirectory is
         # in the library but none of them is a child of the folder, so the
