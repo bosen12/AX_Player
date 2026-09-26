@@ -2903,3 +2903,34 @@ emits=[('emitted', 'ax-restore-library')]  worker_still_alive=False
 今晚那個目錄被寫了 15 個檔。檔名是路徑的 MD5，所以用我播過的路徑反算：14 個對得上。**只刪了 8 個**——`Temp\claude` 以下只有測試會用到的那些；另外 6 個是 `C:`、`C:\Users`……`Temp` 這些共用上層目錄的轉址，擁有者自己在個人資料夾下播任何東西都會寫，今晚只是更新了時間戳，不動。1 個對不上的也不動。
 
 CLAUDE.md 補上這條：導向 `LOCALAPPDATA` 只隔離 AX 自己的資料，不隔離 mpv 的。
+
+### 9.59 09-26：發 AX v1.3.11 / FM v1.6.11
+
+兩邊 HEAD 的 CI 都是綠的才開始。AX 產品碼自 v1.3.10 起的改動：§9.56 的打包裁剪、§9.57 的 NAS、§9.58 的標題列與還原的輪詢設計、`setup_mpv.py` 的 cp1252；FM：§9.56 的打包裁剪與版本號。
+
+#### 驗證鏈
+
+```
+CI                                AX 57c38fa / FM 752ce56 皆 success；修正後的還原設計另外重跑到 6 個工作全綠
+本機 suite                        AX 197 × 3.10/3.14、FM 378 × 3.10/3.14（Deprecation 視為錯誤）
+建置                              從標籤對應的 commit（AX 753bcb9、FM 576b2a1），Analysis 的 codex 路徑 0
+大小                              AX onefile 30,274,352 / onedir zip 30,328,444 / FM 17,805,384 bytes
+出貨 binary 的位元組碼（對照部署中的舊版）
+  AX restore_library 以 QTimer 輪詢    新 True / 舊 函式不存在
+  AX 還原執行緒發 Qt 訊號              新 False
+  AX 標題列 setTextFormat               新 True / 舊 False
+  AX PYZ 含 PIL/numpy                  新 False / 舊 True
+  AX 含 opengl32sw / Qt6Quick          新 False / 舊 True
+  FM 版本字串                           新 1.6.11 / 舊 1.6.10
+  FM PYZ 含 numpy/cryptography         新 False / 舊 True
+  FM 保留 PIL.Image / 含 _avif          新 True/False / 舊 True/True
+冒煙（不播放任何檔案——見 §9.58 的 watch_later）
+  AX onefile / onedir，last_folder 指向不回應的 NAS   UI 2.15 s / 1.34 s 即可回應
+  FM --demo：一般 / --start-hidden                     視窗出現 / 藏進托盤；_imaging、cffi、WebView2、CLR 皆載入
+GitHub 資產 digest                三個都 == 本地 sha256
+發行複本                          六個 SHA256 全部 MATCH；onedir 240 vs 240（robocopy exit 3 = 複製 + 刪掉舊的多餘檔）
+部署後煙霧                        AX onefile UI 1.62 s 可回應；FM 視窗出現
+殘留                              行程 0；%TEMP% 只剩 09-23 那個不是這一輪的 _MEI
+```
+
+這一輪的冒煙測試刻意**不播放**：§9.58 查出 libmpv 的續播紀錄不跟著 `LOCALAPPDATA` 走，播放就會寫進擁有者真實的 `watch_later`。播放本身已在同一份產品碼（`d18fff2`，之後只有文件與版本號變更）的凍結版上驗過。
