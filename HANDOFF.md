@@ -2951,4 +2951,10 @@ FM：套用請求等 `_apply_lock` 時，UI 可換掉 Settings；舊請求會拿
 
 驗證基線 AX 197／FM 378，修正後 AX 205／FM 386。七組記憶體 mutation 全被攔截：settings、tick 重入、scan 取消、Qt 舊結果、遞迴遍歷、metadata stat、網址日誌，不改 checkout。Qt queued-signal 測試只 dispatch 自己 QObject 的 MetaCall：全域 processEvents 會觸發其他測試殘留的不完整 widget fake 並 abort，不能視為產品崩潰。
 
-目標版本 AX v1.3.12／FM v1.6.12；建置、凍結版及遠端 CI 結果交付後補記。沒有驗證 AMD 實機補幀，也沒有為冒煙播放使用者影片。
+交付 AX v1.3.12（`ef48ff4`）／FM v1.6.12（`8412ad5`，修正 `c1a0289`），兩者 main、標籤與 GitHub release 已推送。AX CI `36836314752` 的 3.10/3.14 均 success；FM CI `36836303900` success。本機最終雙版本 AX 205／FM 386 通過（發版 3.14 也以 DeprecationWarning=error 驗證）。
+
+固定 Python 3.14.6 / PyInstaller 6.22.2 重建三種成果；直接抽取三個 exe 的 PYZ，將 code object 的檔名正規化後，AX app、FM watcher／版本模組逐一與來源編譯結果相等，numpy 仍不在 bundle。AX onefile 30,273,660 bytes，onedir ZIP 31,124,679；FM 17,805,278。ZIP 工具不同，不將壓縮檔差異解釋成產品變大。
+
+隔離 APPDATA／LOCALAPPDATA 的 AX onedir、onefile 與 FM --demo 都啟動；AX 日誌確認載入 C:\mpv，FM demo 沒啟動 watcher。不播放任何影片，沒有碰使用者續播紀錄。Computer Use list_windows 確認 AX onedir／FM 視窗存在，但 get_window_state 的應用存取核准逾時，所以**沒有完成畫面驗收**。AX 啟動日誌仍有既有個人 runtime 的 mpvSockets 命令語法警告；本次沒有修改 C:\mpv 或宣稱它已修復。測試完成只終止自己的實例（onefile 只終止 child，讓 bootloader 清理解壓目錄），記錄的五個 PID 最後均不存在。AMD 實機補幀仍未驗證。
+
+GitHub 三資產 digest 全等於本機 SHA256。C:\AX_Player\onedir 全 238 檔逐檔相同，onefile、release 三資產及 C:\Fluid_Motion\FluidMotion.exe 均 MATCH；README、NOTICE／LICENSE 與版本說明同步。原 onedir 保留於 C:\AX_Player\onedir-v1.3.11-backup-20261001，未刪除。來源工作樹的未追蹤 AGENTS.md 保持原樣，未提交。
