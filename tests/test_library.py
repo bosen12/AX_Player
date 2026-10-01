@@ -1,5 +1,6 @@
 """Regression cover for the library/playlist routing fixed in v1.1.5-v1.1.7."""
 import types
+import threading
 from pathlib import Path
 
 from PySide6.QtGui import QCloseEvent
@@ -158,8 +159,9 @@ class _OpenWindow:
         self._requested_thumbs = {"stale"}
         self._sort_mode = "name"
         self._scan_signals = object()
+        self._scan_cancel = threading.Event()
         self.jobs = []
-        self._scan_pool = types.SimpleNamespace(start=self.jobs.append)
+        self._scan_pool = types.SimpleNamespace(start=self.jobs.append, clear=lambda: None)
 
 
 def test_open_folder_normalises_a_relative_path(tmp_path, monkeypatch):
@@ -258,7 +260,7 @@ def test_a_missing_folder_does_not_take_the_scan_thread_down(tmp_path):
     job = _ScanJob(tmp_path / "gone", False, None, _Signals(), settings.SORT_NAME, True)
     job.run()
 
-    assert job._signals.emitted == [(str(tmp_path / "gone"), [], "", True)]
+    assert job._signals.emitted == [(str(tmp_path / "gone"), [], "", True, job._cancel)]
 
 
 class _Signals:
@@ -786,6 +788,7 @@ def test_closing_hides_the_window_before_tearing_mpv_down(qapp, monkeypatch, tmp
                 clear=lambda: order.append("thumb_pool.clear")
             )
             self._scan_pool = types.SimpleNamespace(clear=lambda: None)
+            self._scan_cancel = threading.Event()
 
         def hide(self):
             order.append("hide")
@@ -845,7 +848,7 @@ def test_the_scan_job_reports_a_sort_it_could_not_finish(tmp_path, monkeypatch):
 
     (tmp_path / "ep01.mkv").write_bytes(b"")
 
-    def exploding(paths, mode):
+    def exploding(paths, mode, cancel=None):
         raise ValueError("invalid literal for int() with base 10: '①'")
 
     monkeypatch.setattr(app_mod, "_sort_playlist", exploding)
@@ -1080,7 +1083,8 @@ def test_relisting_the_open_folder_does_not_touch_the_share(tmp_path, monkeypatc
         _recursive=False,
         _sort_mode=settings.SORT_NAME,
         _scan_signals=None,
-        _scan_pool=types.SimpleNamespace(start=lambda job: started.append(job)),
+        _scan_cancel=threading.Event(),
+        _scan_pool=types.SimpleNamespace(start=lambda job: started.append(job), clear=lambda: None),
     )
     real_resolve = Path.resolve
     resolved = []

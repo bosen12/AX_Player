@@ -2934,3 +2934,21 @@ GitHub 資產 digest                三個都 == 本地 sha256
 ```
 
 這一輪的冒煙測試刻意**不播放**：§9.58 查出 libmpv 的續播紀錄不跟著 `LOCALAPPDATA` 走，播放就會寫進擁有者真實的 `watch_later`。播放本身已在同一份產品碼（`d18fff2`，之後只有文件與版本號變更）的凍結版上驗過。
+
+### 9.60 10-01：讓過時的背景工作失效
+
+基線 AX `f72e45b`／FM `576b2a1`。保留 §9.56 打包裁剪與先前測量結論；這次質疑背景工作完成時，是否仍代表使用者最新要求。
+
+AX：`_on_folder_scanned` 只比路徑，同資料夾重掃或 A→B→A 仍接受舊結果，甚至沿用舊 `reload_player=True`。現在開啟時取消前一個 Event、清掉待執行工作；Event 隨 Qt 訊號送到接收端，已排入事件佇列的舊結果也失效。scan 在檔案／目錄邊界停止，日期／大小排序取消後不再 stat 後續檔案。關閉先取消，再處理 Qt 事件。
+
+**量測與限制：** Windows 已阻塞的單次檔案系統呼叫仍要等它返回；沒有宣稱離線 NAS timeout 消失，也沒有加執行緒。受控 100 目錄測試在第二個目錄取消，只訪問 2 個（移除修正為 100）；100 檔案大小排序在首次 stat 取消，只讀 1 次（移除修正為 100）。這是避免工作量的證據，不是實機 FPS 或所有片庫的加速百分比。
+
+AX 額外修正：`pick_url` 在 `play_url` 的遮蔽之前就記錄原始輸入，連取消也會把 userinfo／query／fragment 寫入日誌。改用既有 `safe_url`；測試接受與取消兩條路徑，播放仍收到完整 URL。
+
+FM：套用請求等 `_apply_lock` 時，UI 可換掉 Settings；舊請求會拿新設定產生腳本、卻記錄舊 key，或關閉後重新加濾鏡。現在固定 snapshot，取鎖後確認未被取代且 enabled。apply/remove 記帳在釋放操作鎖前完成。tick 加非阻塞重入防護，背景忙時橋接端不重複 discovery、不排隊等待，下一輪收斂。停止後不重新連線或回填 `_ipc`：未公開連線由 tick 清理，已公開的由 stop 先 remove 再 close。
+
+獨立審查指出第一版 shutdown guard 會搶先 close 已公開管線，打斷 stop 的 remove。先用 Event 控制順序重現（remove 未完成已有兩次 close），再修正清理責任；回歸要求 remove→close。TRT/ncnn 產生器與 `vf_ok` 語意未動。
+
+驗證基線 AX 197／FM 378，修正後 AX 205／FM 386。七組記憶體 mutation 全被攔截：settings、tick 重入、scan 取消、Qt 舊結果、遞迴遍歷、metadata stat、網址日誌，不改 checkout。Qt queued-signal 測試只 dispatch 自己 QObject 的 MetaCall：全域 processEvents 會觸發其他測試殘留的不完整 widget fake 並 abort，不能視為產品崩潰。
+
+目標版本 AX v1.3.12／FM v1.6.12；建置、凍結版及遠端 CI 結果交付後補記。沒有驗證 AMD 實機補幀，也沒有為冒煙播放使用者影片。

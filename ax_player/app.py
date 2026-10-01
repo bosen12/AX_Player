@@ -219,11 +219,17 @@ def natural_key(name: str) -> tuple:
     return (parts, lowered)
 
 
-def _sort_playlist(paths: list[Path], mode: str) -> list[Path]:
+def _sort_playlist(
+    paths: list[Path], mode: str, cancel: threading.Event | None = None,
+) -> list[Path]:
     if mode == settings.SORT_NAME:
         return sorted(paths, key=lambda p: natural_key(p.name))
 
     def stat_key(path: Path) -> float:
+        # A cancelled result is discarded by the job; only avoid additional
+        # network round trips here, without changing normal sort ordering.
+        if cancel is not None and cancel.is_set():
+            return 0.0
         try:
             st = path.stat()
         except OSError:
@@ -246,8 +252,9 @@ def _log_scan_error(error: OSError) -> None:
 
 
 class _ScanSignals(QObject):
-    # folder path, [str video path], select path ("" for none), reload player
-    done = Signal(str, list, str, bool)
+    # Include the cancellation token: even a signal already queued in Qt can
+    # belong to an obsolete scan of the very same folder.
+    done = Signal(str, list, str, bool, object)
 
 
 def _reveal(video: Path) -> None:
@@ -301,6 +308,7 @@ class _ScanJob(QRunnable):
         signals: _ScanSignals,
         sort_mode: str,
         reload_player: bool,
+        cancel: threading.Event | None = None,
     ):
         super().__init__()
         self._folder = folder
@@ -309,6 +317,7 @@ class _ScanJob(QRunnable):
         self._signals = signals
         self._sort_mode = sort_mode
         self._reload_player = reload_player
+        self._cancel = cancel if cancel is not None else threading.Event()
 
     def _scan(self) -> list[Path]:
         """Every video under the folder, via os.scandir rather than Path.
@@ -343,23 +352,34 @@ class _ScanJob(QRunnable):
         what a bug report needs to be answerable at all.
         """
         found: list[Path] = []
+        if self._cancel.is_set():
+            return found
         if self._recursive:
             for root, _dirs, files in os.walk(self._folder, onerror=_log_scan_error):
+                if self._cancel.is_set():
+                    return []
                 root_path = Path(root)
                 found.extend(root_path / name for name in files if is_video_name(name))
         else:
             with os.scandir(self._folder) as entries:
                 for entry in entries:
+                    if self._cancel.is_set():
+                        return []
                     if is_video_name(entry.name) and entry.is_file():
                         found.append(Path(entry.path))
         return found
 
     @Slot()
     def run(self) -> None:
+        if self._cancel.is_set():
+            return
         try:
             # Sorting by date/size stats every file, so it belongs here on the
             # worker thread with the scan, not on the UI thread afterwards.
-            playlist = _sort_playlist(self._scan(), self._sort_mode)
+            paths = self._scan()
+            if self._cancel.is_set():
+                return
+            playlist = _sort_playlist(paths, self._sort_mode, self._cancel)
         except OSError:
             playlist = []
         except Exception as exc:  # noqa: BLE001 -- see below
@@ -379,12 +399,15 @@ class _ScanJob(QRunnable):
             # answerable.
             debug_log.log_exc(f"folder scan/sort failed for {self._folder!r}")
             playlist = []
+        if self._cancel.is_set():
+            return
         _emit_safely(
             self._signals.done,
             str(self._folder),
             [str(p) for p in playlist],
             str(self._select) if self._select else "",
             self._reload_player,
+            self._cancel,
         )
 
 
@@ -454,6 +477,7 @@ class AXPlayerWindow(QWidget):
         # is still scanning naturally queues behind it, and _on_folder_scanned
         # discards stale results if a third supersedes both.
         self._scan_pool = QThreadPool(self)
+        self._scan_cancel = threading.Event()
         self._scan_pool.setMaxThreadCount(1)
         self._scan_signals = _ScanSignals(self)
         self._scan_signals.done.connect(self._on_folder_scanned)
@@ -640,7 +664,7 @@ class AXPlayerWindow(QWidget):
 
     def pick_url(self) -> None:
         url, ok = QInputDialog.getText(self, "開啟網址", "輸入影片網址：")
-        debug_log.log(f"pick_url: ok={ok} raw={url!r}")
+        debug_log.log(f"pick_url: ok={ok} url={debug_log.safe_url(url)!r}")
         if ok and url.strip():
             self.play_url(url.strip())
 
@@ -733,6 +757,12 @@ class AXPlayerWindow(QWidget):
         self._folder = folder
         self._requested_thumbs.clear()
         settings.set_last_folder(str(folder))
+        # One active scan and at most one pending request. Cancellation cannot
+        # interrupt a Windows filesystem call, but it stops the obsolete walk
+        # as soon as that call returns instead of scanning the remaining tree.
+        self._scan_cancel.set()
+        self._scan_pool.clear()
+        self._scan_cancel = threading.Event()
         self._scan_pool.start(
             _ScanJob(
                 folder,
@@ -741,12 +771,16 @@ class AXPlayerWindow(QWidget):
                 self._scan_signals,
                 self._sort_mode,
                 reload_player,
+                self._scan_cancel,
             )
         )
 
     def _on_folder_scanned(
-        self, folder_str: str, paths: list[str], select_str: str, reload_player: bool
+        self, folder_str: str, paths: list[str], select_str: str, reload_player: bool,
+        cancel: threading.Event | None = None,
     ) -> None:
+        if cancel is not None and cancel.is_set():
+            return
         folder = Path(folder_str)
         if folder != self._folder:
             return  # a newer open_folder() call already superseded this scan
@@ -1175,6 +1209,8 @@ class AXPlayerWindow(QWidget):
             self.play(videos[0])
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # Mark queued results obsolete before processEvents can deliver them.
+        self._scan_cancel.set()
         # Saved before hiding, while the window still reports a real geometry.
         settings.set_geometry(self.saveGeometry())
         settings.set_unwatched_only(self.sidebar.unwatched_only())
