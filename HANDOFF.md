@@ -2981,3 +2981,19 @@ GitHub 三資產 digest 全等於本機 SHA256。C:\AX_Player\onedir 全 238 檔
 - AX 沒有單一實例機制，每播一部都會開一個新的 AX 視窗。要把網址送進已經開著的 AX 視窗，需要 QLocalServer 之類的 IPC，這一輪沒做。
 - 擁有者曾用真的 Telegram 連結、透過 AX 的「網址」按鈕播放（04:05 的日誌記到 loadfile OK），但「TG 播放器 → 新版 AX」這條完整路徑還沒用真的帳號驗過。上面的端對端都是假後端。
 - 換 port（8765 → 9888）會讓舊網址的 watch_later 對不上。只有擁有者試播過的那一部受影響。
+
+#### 發 v1.3.13，以及打包夾帶了被 git 忽略的檔案
+
+`7d6875a` 推上 main，CI `37061154781` 的 3.10／3.14 都是 success。用 Python 3.14.6／PyInstaller 6.22.2 重建，工作樹乾淨（只有沒追蹤的 AGENTS.md）。
+
+**★ 第一次重建的 onedir 有 240 檔，v1.3.12 是 238。** 多出來的是 `mpv-runtime/scripts/zz-fluid-ipc.lua` 和 `mpv-runtime/shaders/fluid_rife.vpy`。兩個都被 `.gitignore` 排除，是 Fluid Motion 用原始碼測試時寫進 repo 的 `mpv-runtime/`（第 309 行「收尾時要刪掉」），日期是 08-31。spec 把 `mpv-runtime/scripts`、`shaders` 整個目錄收進去，**不管檔案有沒有被 git 追蹤**。所以發行內容取決於建置那台機器的工作目錄，不只取決於 commit。CI 從乾淨 checkout 跑，抓不到這件事；`test_bundle_contents.py` 檢查的是「該有的有沒有」，不檢查「不該有的有沒有」。
+
+這一輪的處理：把兩個檔案暫時移到 scratchpad，重建 onedir／onefile，檔案清單和 v1.3.12 的備份逐條相同（238），onefile 的 CArchive 裡也沒有它們。建完再放回原位，擁有者的開發環境維持原狀。**下次建置前要先確認 `mpv-runtime/` 裡沒有被忽略的檔案**，或讓 spec／測試拒絕它們。這一輪沒有改 spec。
+
+另外，先前（04:16 那次建置）部署到 `C:\AX_Player\onedir` 的那份含有這兩個檔案。最終部署用 robocopy /MIR（exit 3 = 複製加刪除多餘檔），已經移除，部署後 238 檔逐一 hash 相同。
+
+**打包內容比對：** 抽出兩個 exe 的 PYZ，`ax_player.app`、`ax_player.dnd` 的 code object 逐欄遞迴比對（bytecode、consts、names、linetable、exceptiontable 等）都和原始碼編譯結果相同；PIL／numpy 不在 PYZ。**`marshal.dumps` 的位元組直接比對會是 False**：字串 interning 的參照旗標不同，不代表程式碼不同。§9.60 的「正規化後相等」如果是用位元組比對，要注意這一點。
+
+**冒煙：** 最終兩個成品各跑一次假後端端對端，都收到 14,774,755 bytes。onefile 關的是有視窗的 child（bootloader 沒有視窗），bootloader 以 0 結束，`%TEMP%` 沒有新增 `_MEI`（原本就有 98 個舊的，不是這一輪留下的）。沒有殘留行程，也沒有留下 watch_later。中途有一次 onedir 關閉超過 20 秒，測試腳本沒有強殺它，它稍後自己結束了；重跑一次是乾淨的。
+
+**發佈：** tag `v1.3.13` → `7d6875a`，GitHub release「AX Player v1.3.13」。兩個資產的 digest 都等於本機 SHA256：`AXPlayer-onedir.zip` 0145c87b…（30,163,447 bytes）、`AXPlayer.exe` 447c7e23…（30,270,990 bytes）。`C:\AX_Player` 的 onefile 與 release 兩個資產都 MATCH，`版本說明.txt` 已更新；FluidMotion.exe 沒有動。舊 onedir 保留在 `onedir-v1.3.12-backup-20261003`。
