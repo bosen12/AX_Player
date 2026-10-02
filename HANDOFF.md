@@ -2997,3 +2997,50 @@ GitHub 三資產 digest 全等於本機 SHA256。C:\AX_Player\onedir 全 238 檔
 **冒煙：** 最終兩個成品各跑一次假後端端對端，都收到 14,774,755 bytes。onefile 關的是有視窗的 child（bootloader 沒有視窗），bootloader 以 0 結束，`%TEMP%` 沒有新增 `_MEI`（原本就有 98 個舊的，不是這一輪留下的）。沒有殘留行程，也沒有留下 watch_later。中途有一次 onedir 關閉超過 20 秒，測試腳本沒有強殺它，它稍後自己結束了；重跑一次是乾淨的。
 
 **發佈：** tag `v1.3.13` → `7d6875a`，GitHub release「AX Player v1.3.13」。兩個資產的 digest 都等於本機 SHA256：`AXPlayer-onedir.zip` 0145c87b…（30,163,447 bytes）、`AXPlayer.exe` 447c7e23…（30,270,990 bytes）。`C:\AX_Player` 的 onefile 與 release 兩個資產都 MATCH，`版本說明.txt` 已更新；FluidMotion.exe 沒有動。舊 onedir 保留在 `onedir-v1.3.12-backup-20261003`。
+
+### 9.62 10-03：FM 的 TensorRT 編譯時間（發 FM v1.6.13）
+
+擁有者問能不能加快 TensorRT 編譯，並交代「量完自己判斷，什麼都不做也可以」。之前只有 README 一句「可能數分鐘」，**從來沒量過**。
+
+**量測方法：** 用 `C:\mpv` 的 VSPipe 跑一個 .vpy，`Backend.TRT` 參數和 `render_vpy` 的 NVIDIA 分支一字不差（fp16、force_fp16、tf32、static_shape、1 stream、無 CUDA graph、無 JIT conv、tiling 0、output_format 1），只改要比較的那一項。每次都用全新的 engine_folder 冷編。編譯時間取 trtexec 自己印的「Engine built in」。補幀速度用已編好的 engine、各等級交錯跑三輪、每輪 3840 幀，讓 GPU 溫度和時脈的漂移平均落在每個等級上。RTX 5070 Ti、驅動 610.62、TensorRT 10.16、RIFE 4.26、multi=2。
+
+| 設定 | 1080p 編譯 | 1080p fps | 4K 編譯 | 4K fps |
+|---|---|---|---|---|
+| level 3（現行） | 45.6／39.9 s | 200.3 | 49.9／49.8 s | 51.5 |
+| level 2 | 40.4／39.8 s | 198.5 | — | — |
+| level 1 | 14.9／14.9 s | 191.4（−4.5%） | 17.2／16.4 s | 48.3（−6.3%） |
+| level 0 | 16.3 s | 121.3（−40%） | — | — |
+| level 3 + max_tactics=4 | 39.2 s | 170.7（−16%） | — | — |
+
+**否決，留著是為了不要有人再提一次：**
+- **level 1**：4K 23.976 fps 做 2x 需要 47.95 fps，level 1 只有 48.3，還沒算 mpv 自己解碼的負擔。它犧牲的正好是最沒餘裕的情況。
+- **level 2**：省 1–6 秒。但 level 會寫進 engine 檔名（`_opt3`），一改所有既有快取都失效，每個解析度都要重編一次。
+- **max_tactics**：**不會寫進 engine 檔名**。用它編出的較慢 engine 和 level 3 的 engine 同名（實測都是 `c673cb51.engine`），之後拿掉這個參數也會一直沿用那個慢的。
+
+**採用：timing cache 預先放入。** vsmlrt 為每個 engine 存一份 `--timingCacheFile=<engine>.cache`，engine 名含解析度，所以每個新解析度都從零量測。先把別的 cache 複製到新 engine 的 cache 名稱上：
+
+| 情況 | 編譯 |
+|---|---|
+| 720p 冷編 | 40.9 s |
+| 720p，放入 1080p 的 cache | 21.2 s |
+| 720p，放入自己的 cache（上限） | 6.6 s |
+| 1920×800 冷編 | 43.8 s |
+| 1920×800，放入累積的 cache | 19.2 s |
+
+放入 cache 編出的 720p engine 是 425.0 fps，冷編的是 426.1（交錯三輪），在誤差內。trtexec 會把合併後的 cache 寫回（1080p 8.8 MB + 720p 7.6 MB → 10.5 MB），所以效果會累積。隨機內容的檔案、截斷的 cache 都被 trtexec 忽略，照常冷編，rc=0。「格式正確但來自其他 TensorRT 版本」的 cache 沒辦法在這裡造出來，所以加了重試：帶 cache 的編譯失敗時，移除 cache、不帶 cache 再編一次。
+
+實作在 FM `057bb1f`：`_TRT_TIMING_CACHE_SEED` 插在產生的腳本 `from vsmlrt import ...` 之後。它包住 `vsmlrt.get_engine_path`，engine 不存在（或小於 1024 bytes，vsmlrt 自己的重編門檻）、自己的 cache 也不存在、而且在 FM 的 engine 資料夾裡時，複製資料夾裡最新的非空 `*.engine.cache`。另外把 `RIFE` 包一層做重試。**`RIFE(...)` 呼叫與 `Backend.TRT(...)` 參數一個字都沒改**，所以 pinned test 不用動。ncnn 與沒有 engine_folder 的輸出和之前逐字相同（有存改動前的輸出比對）。mpv 每次 seek 都重跑腳本，engine 已存在時只多兩次 stat。
+
+**★ 端對端抓到的 bug：** 第一版重試先 `deepcopy((args, kwargs))` 保存乾淨的參數，因為 `RIFE()` 會改 backend（`force_fp16`、`custom_args`）。但 `VideoNode` 不能複製，**每一次呼叫都在 RIFE 開始前就報錯**。單元測試的假 clip 是普通物件，看不出問題；把 FM 產生的腳本放進 VSPipe 的外殼（自己定義 `video_in`、`container_fps` 再 exec）才在第一次執行就炸開。如果沒有這一步，NVIDIA 上的補幀會全面失效。改成只複製 backend，並加了一個拒絕被複製的假 clip 當回歸測試。
+
+**測試：** `tests/test_timing_cache_seed.py` 10 條，從 `render_vpy()` 的實際輸出切出這段程式，對假 vsmlrt 執行。13 個突變全部攔截。「不檢查資料夾」那個一開始漏了：另一個資料夾本來就沒有 cache 可以複製，所以有沒有檢查結果都一樣。補一份 cache 進去才變紅。FM 386 → 396，3.10／3.14 都通過，CI `37066533695` success。
+
+**端對端（真的 vsmlrt／trtexec）：** VSPipe 外殼裡，已有 1080p → 第一次播 720p 時自動放入 cache，編譯 21.9 s；再執行一次（模擬 seek）沒有重編也沒有複製；經 FM 腳本補 2000 幀，267 fps。真的 mpv（`--no-config`，所以 FM 的 watcher 連不上，也不寫 watch_later）播 1600×900：放入 cache，編譯 22.3 s，300 幀正常。
+
+**發 FM v1.6.13：** `d32288f`（Bump to 1.6.13），Python 3.14 重建，`vs_script`／`__init__`／`watcher` 的 code object 逐欄和原始碼相同（不是比 `marshal.dumps` 的位元組，原因見 §9.61），numpy 不在 PYZ。`--demo` 冒煙：視窗 2 秒出現，按關閉會縮到系統匣，所以 CloseMainWindow 關不掉。只結束有視窗的 child（46464，parent 50268），bootloader 自己清掉 `_MEI`，沒有殘留。擁有者正在跑的 FM 沒被碰到。GitHub 資產 digest == 本機 SHA256 6ffa3a33…（17,807,120 bytes）。`C:\Fluid_Motion\FluidMotion.exe` 正在執行，不能覆蓋：舊版改名為 `FluidMotion-v1.6.12.exe`（執行中的 exe 可以改名），新版放上去，README 也同步。`C:\AX_Player\release\FluidMotion.exe` MATCH。**擁有者要重新啟動 FM 才會用到新版。**
+
+**這一輪的副作用與沒解開的事：**
+- §9.61 用 C:\mpv 設定開 AX 做冒煙時，擁有者的 FM 正在背景執行，就把補幀套到了那些測試播放器上（`fluid_debug.log` 04:20–04:37 記到那些 pid）。結果在擁有者真正的 engine 快取裡編出三個測試影片解析度的 engine（04:28／04:29／04:34，連同 cache 約 105 MB）。沒有刪：它們無害，而且之後新解析度會拿最新的 cache 當種子。**之後用 C:\mpv 設定做播放冒煙時，要先確認 FM 沒在跑，或改用 `--no-config`。** §9.61 onedir 那次關閉超過 20 秒，原因也是這個：它正在編譯 engine。
+- 快取裡有一個 09-04 的 0 byte `19de2d.engine`，應該是某次編譯失敗留下的。vsmlrt 會把小於 1024 bytes 的 engine 視為不存在而重編，所以無害。
+- 第一批量測裡有一筆（`o3_1080b`）的 engine 時間戳比它自己那次 VSPipe 還早，日誌裡也沒有 trtexec 輸出。原因沒查出來，整筆作廢，改用上面的交錯方法重量。
+- 只量了 RIFE 4.26 和這張 RTX 5070 Ti。比較舊的顯卡編譯更久，等比例省下的時間會更多，但沒有量過。
