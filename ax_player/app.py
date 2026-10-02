@@ -1331,6 +1331,27 @@ def _bootstrap_mpv_if_needed() -> bool:
     return True
 
 
+def open_launch_target(window, target: str) -> None:
+    """Open what the command line named: a file, a folder, or a URL.
+
+    URLs are what lets another program hand AX a stream -- the Telegram relay
+    launches `AXPlayer.exe http://127.0.0.1:9888/t.me/...`. Before this, a URL
+    went through Path(), was neither a file nor a folder, and the window
+    opened on nothing. Classified by dnd.classify() so the command line and a
+    drop agree on what counts as a URL: a bare `C:\\Videos\\ep1.mkv` has a
+    one-letter "scheme" and must stay a path.
+    """
+    kind, text = dnd.classify(target)
+    if kind == dnd.URL:
+        window.play_url(text)
+        return
+    path = Path(target)
+    if path.is_file():
+        window.play(path)
+    elif path.is_dir():
+        window.open_folder(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     # A windowed (console=False) build has nowhere for an uncaught exception
     # to go -- Qt just prints to a stderr nobody can see and the app either
@@ -1360,11 +1381,7 @@ def main(argv: list[str] | None = None) -> int:
 
     targets = [a for a in argv[1:] if not a.startswith("-")]
     if targets:
-        target = Path(targets[0])
-        if target.is_file():
-            window.play(target)
-        elif target.is_dir():
-            window.open_folder(target)
+        open_launch_target(window, targets[0])
     else:
         # Reopen whatever library was last in use, so a normal launch lands
         # on the file list rather than an empty sidebar. Skipped when a file

@@ -2958,3 +2958,26 @@ FM：套用請求等 `_apply_lock` 時，UI 可換掉 Settings；舊請求會拿
 隔離 APPDATA／LOCALAPPDATA 的 AX onedir、onefile 與 FM --demo 都啟動；AX 日誌確認載入 C:\mpv，FM demo 沒啟動 watcher。不播放任何影片，沒有碰使用者續播紀錄。Computer Use list_windows 確認 AX onedir／FM 視窗存在，但 get_window_state 的應用存取核准逾時，所以**沒有完成畫面驗收**。AX 啟動日誌仍有既有個人 runtime 的 mpvSockets 命令語法警告；本次沒有修改 C:\mpv 或宣稱它已修復。測試完成只終止自己的實例（onefile 只終止 child，讓 bootloader 清理解壓目錄），記錄的五個 PID 最後均不存在。AMD 實機補幀仍未驗證。
 
 GitHub 三資產 digest 全等於本機 SHA256。C:\AX_Player\onedir 全 238 檔逐檔相同，onefile、release 三資產及 C:\Fluid_Motion\FluidMotion.exe 均 MATCH；README、NOTICE／LICENSE 與版本說明同步。原 onedir 保留於 C:\AX_Player\onedir-v1.3.11-backup-20261001，未刪除。來源工作樹的未追蹤 AGENTS.md 保持原樣，未提交。
+
+### 9.61 10-03：命令列接受網址（給 Telegram 轉手程式用）
+
+基線 `1953de8`（v1.3.12）。擁有者要在 AX 裡播 Telegram 影片，包括自己是成員的私人群組。
+
+**做法：AX 不碰 Telegram。** 另一個獨立專案 `C:\projects\tg_relay`（**不在這個 repo**）用擁有者自己的帳號（Telethon／MTProto）登入，在 `127.0.0.1:9888` 開一個支援 Range 的 HTTP 轉手伺服器：`https://t.me/c/<id>/<msg>` → `http://127.0.0.1:9888/t.me/c/<id>/<msg>`。mpv 本來就會播 http 串流，跳轉時會帶 Range 重新連線，所以 uosc、thumbfast、watch_later 都照常運作。AX 沒有新增任何播放 UI。這和 README 的原則一致：mpv 已經做好的事，AX 不重做。
+
+轉手程式和 AX 的介面只有一條：它的視窗（TG 播放器）用 `AXPlayer.exe <網址>` 開 AX。**AX 這一側唯一的改動就是讓這條路通。** 舊的 `main()` 把 `argv[1]` 直接丟給 `Path()`，網址既不是檔案也不是資料夾，結果 AX 開出一個空視窗、什麼都沒播。
+
+改成 `open_launch_target()`：用 `dnd.classify()` 判斷，`URL` 交給 `window.play_url()`，其他照舊走 `Path`。沿用 `classify` 的理由和拖曳一樣：`C:\Videos\ep1.mkv` 的磁碟機代號會被解析成一個字母的 scheme，必須維持當成路徑（§7 那張表的第二條）。檔案和資料夾的分支沒有改。
+
+**測試：** `tests/test_launch_target.py` 共 4 條，用一個記錄呼叫的假視窗，不建立 `AXPlayerWindow`，也不碰 libmpv。基線 205 → 209。兩個突變都被攔截：拿掉 URL 分支 → 1 條紅；把任何 scheme 都當 URL → 2 條紅（drive-letter 路徑與無法辨識的文字）。3.10 與 3.14（`-W error::DeprecationWarning`）都是 209 通過。
+
+**端對端（假的 Telegram、真的 HTTP 與 libmpv）：** 轉手伺服器接一個會照 Telegram 規則拒絕沒對齊 offset 的假後端，提供一支 14.7 MB、60 秒、加雜訊的 mkv。依序用三種方式啟動 AX，每種都在命令列帶網址：原始碼（`py -3.10 -m ax_player`，隔離 LOCALAPPDATA）、`dist` 的 onedir、部署後的 `C:\AX_Player\onedir`。三種都在 `debug.log` 記到 `play_url ... loadfile command sent OK`，而且假後端實際送出 14,774,755 bytes。關閉用 `CloseMainWindow()`。
+
+**watch_later：** 原始碼那一輪 AX 用的是 `mpv-runtime`（開了 `save-position-on-quit`），在 `%LOCALAPPDATA%\mpv\watch_later` 留下一筆，以 MD5(網址) 比對後**只刪了那一筆**（§9.58 的做法）。兩個 exe 那幾輪用的是 C:\mpv，查過沒有留下紀錄。
+
+**部署：** 擁有者同意後，`C:\AX_Player\onedir` 先整個備份成 `onedir-v1.3.12-backup-20261003`（238 檔、總位元組相同），再 robocopy 換成新版。
+
+**已知限制，沒有做：**
+- AX 沒有單一實例機制，每播一部都會開一個新的 AX 視窗。要把網址送進已經開著的 AX 視窗，需要 QLocalServer 之類的 IPC，這一輪沒做。
+- 擁有者曾用真的 Telegram 連結、透過 AX 的「網址」按鈕播放（04:05 的日誌記到 loadfile OK），但「TG 播放器 → 新版 AX」這條完整路徑還沒用真的帳號驗過。上面的端對端都是假後端。
+- 換 port（8765 → 9888）會讓舊網址的 watch_later 對不上。只有擁有者試播過的那一部受影響。
