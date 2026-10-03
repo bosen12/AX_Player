@@ -3186,3 +3186,30 @@ could not init VS / Disabling filter fluid because it has failed.
 **測試**：`tests/test_rebuild_hold.py` 14 條，包含 Python 端的判斷與順序、lua 契約的文字檢查。突變 10 個全部攔截。lua 的文字檢查只是護欄，真正的證據是上面的實機數據。註解原本寫了「vf add」三個字，觸發了既有的「lua 絕不自己 add vf」文字檢查，所以改的是措辭，那條檢查保留。FM 399 → 413。
 
 **擁有者要做的**：重開 FM，**也要重開 AX**（播放器要重新載入 lua；沒重開的播放器只是不會暫停，不會壞）。
+
+### 9.68 10-03：★ 1.6.15 在已有 engine 的播放器上一直暫停／繼續，發 FM v1.6.16
+
+**擁有者回報**：「AX 會一直暫停開始，明明已經有 TRT 了」。用 IPC 唯讀觀察擁有者的 AX（`mpvSockets\39812`）：約每 1 s 一輪，`vf=['fluid'] pause=True seeking=True` → `vf=[]` → `seeking=False` → 又掛上，time-pos 停在 591.333 不動。
+
+**原因**：§9.67 處理了 **lua** 會把重建時的刷新 seek 當成使用者 seek，卻沒注意到 **watcher 也有自己的判斷**：`tick()` 用 snapshot 讀到的 `seeking` 呼叫 `_held_off`，讀到 True 就 `_remove_from`，seek hold 檔過期後再重新套用。暫停中套用 → mpv 刷新 seek → watcher 拆掉 → 重新套用 → 再刷新 seek，無止境。**§9.67 的實機端對端全部都是直接呼叫 `apply()`，沒有 watcher 在跑**，跟 §9.63 是同一種錯：測試的情境少了真實使用時一定存在的那一半。§9.67 寫「watcher 的並行邏輯一行都沒動」是對的，但「沒動」不等於「不受影響」。
+
+**止血**：擁有者 AX 已經關閉。FM 換回 v1.6.14（`FluidMotion-v1.6.15-pauseloop.exe` 保留），v1.6.14 啟動時會把 C:\mpv 的 lua 寫回舊版。v1.6.15 的 release 頁最上面加了警告。
+
+**修**（FM `e2f39a4`）：apply() 在任何 vf 操作之前，同步 `set user-data/fluid/holding=true`。不交給 lua 設，是因為 lua 的 message handler 在它自己的執行緒上晚幾 ms 才執行，那時 watcher 可能已經讀到 seeking=True。lua 的 hold 開始時設 true（換檔的 on_preloaded 那條路徑），結束或使用者自己按繼續時設 false。`snapshot_playback` 讀取它（屬性不存在 = 舊腳本 = False），watcher 在 `rebuilding` 為 True 時這一輪不做任何決定。這讓 snapshot 每輪多讀一個屬性：`test_the_budget_does_not_cut_a_player_that_is_answering` 原本鎖 14 個，改成 15 個並把原因寫進註解（那條測試防的是「為了快而少讀」，這次是刻意多讀）。
+
+**測試**：`test_a_rebuild_hold_is_not_mistaken_for_a_user_seek` 用既有的 `_tick_engine`／`_FakeIpc` **跑真的 `tick()`**：holding + seeking 時連跑 3 個 tick，濾鏡不能被拆、也不能被重新套用；沒有 holding 的使用者 seek 仍然會拆。另有 flag 順序／失敗時清除，以及 lua 契約。突變 5 個全部攔截，包括「拿掉 watcher 的 rebuilding 判斷」。FM 413 → 416。
+
+**這次的實機有 watcher 在跑**：先停掉擁有者的 FM（單一實例保護下，原始碼版會直接把控制權交給已經在跑的那一個），從原始碼啟動 FM（`--start-hidden`，隔離 APPDATA，engine 資料夾是空的），開一個真的 mpv，用 `--config-dir=C:\mpv` 載入完整設定（uosc、thumbfast、mpvSockets），聲音輸出音量 0。**第一次跑的 IPC 全部 `<busy>`**：C:\mpv 的 `mpvSockets.lua` 把管道改名成 `%TEMP%\mpvSockets\<pid>`（§7「後寫的贏」），測試送的 seek 一個都沒送到，那一輪不算數。改正後：
+
+| 階段 | 結果 |
+|---|---|
+| A 冷編 960×540 | 36.9 s 後以 47.95 fps 播放 |
+| **B engine 已編好，觀察 20 s** | **40 次取樣全部是播放中**，vf 增減 0 次 |
+| C 播放中 seek ×3 | 每次 2.7／4.3／2.8 s 回到補幀播放 |
+| D 暫停中 seek | 維持暫停，濾鏡掛著，沒有風暴，按播放 0 s 內繼續 |
+| E 換到 854×480 | 23.9 s 回到補幀播放 |
+| F 之後 10 s | 暫停 0 次 |
+
+全程 underrun 0、影音不同步 0。測試影片的 watch_later 兩筆已刪除。測完後部署 v1.6.16 並啟動擁有者的 FM，C:\mpv 的 lua 是新版的。
+
+**教訓，三次都是同一個**：§9.63（腳本只在全新的直譯器裡執行一次）、§9.67／§9.68（只呼叫 `apply()`、沒有 watcher）。FM 的行為是 **watcher + lua + mpv 三方**一起決定的，只要測試少了其中一方，就會漏掉它們之間的交互作用。**改到套用流程的任何一環，都要讓完整的 FM（含 watcher）對著真的 mpv 跑過，並且觀察「engine 已存在」的穩定狀態一段時間**；只看冷編那一次是不夠的。
