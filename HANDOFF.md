@@ -3044,3 +3044,43 @@ GitHub 三資產 digest 全等於本機 SHA256。C:\AX_Player\onedir 全 238 檔
 - 快取裡有一個 09-04 的 0 byte `19de2d.engine`，應該是某次編譯失敗留下的。vsmlrt 會把小於 1024 bytes 的 engine 視為不存在而重編，所以無害。
 - 第一批量測裡有一筆（`o3_1080b`）的 engine 時間戳比它自己那次 VSPipe 還早，日誌裡也沒有 trtexec 輸出。原因沒查出來，整筆作廢，改用上面的交錯方法重量。
 - 只量了 RIFE 4.26 和這張 RTX 5070 Ti。比較舊的顯卡編譯更久，等比例省下的時間會更多，但沒有量過。
+
+### 9.63 10-03：★ 1.6.13 讓補幀在 seek 後失效，發 FM v1.6.14
+
+**擁有者回報**：FM 介面顯示來源 29.97、輸出 29.97，「輸出偏低 · 目標 60 · 實測 29.97 — 效能不足」。AX 的 `debug.log`：
+
+```
+File "C:\mpv/shaders/fluid_rife.vpy", line 31, in _fm_seeding_get_engine_path
+    path = _fm_get_engine_path(*args, **kwargs)        <- 同一行出現兩層
+NameError: name '_fm_get_engine_path' is not defined
+could not init VS / Disabling filter fluid because it has failed.
+```
+
+**原因**：mpv 每次 seek、每次重新初始化濾鏡，都在**同一個** Python 直譯器裡重新執行 .vpy。vsmlrt 一直留在 `sys.modules`，上一次執行的全域變數則會被拆掉。§9.62 的 1.6.13 把包裝函式裝在 `vsmlrt.get_engine_path` 上，之後沒有拿掉。下一次執行時，新的包裝把舊的包裝當成「原本的函式」再包一層；舊的那層還在它自己的全域變數裡找 `_fm_get_engine_path`，但那個命名空間已經被清空了。第一次播放正常，第一次 seek 之後補幀就沒了。
+
+**為什麼 §9.62 的驗證全部漏掉**：單元測試每次都 exec 進一個全新的 namespace，也沒有清空它；VSPipe 的「再執行一次（模擬 seek）」是**另一個行程**；真的 mpv 那一輪只播了 300 幀，從頭到尾沒有 seek。三種驗證都是「每個直譯器只執行一次腳本」，恰好是唯一看不出問題的情況。§9.62 裡寫的「mpv 每次 seek 都重跑腳本」，我自己寫進了註解，卻沒有拿它來設計測試。**產生的 .vpy 只要會碰到行程層級的狀態（模組屬性、sys.modules、環境變數），就必須在同一個直譯器裡執行多次來測，最好用真的 mpv 加 seek。**
+
+**修正（FM `b58d00e`）**：
+- 只在 `RIFE()` 呼叫期間替換 `vsmlrt.get_engine_path`，用 `finally` 換回，執行結束後什麼都不留。
+- 包裝函式所需的東西全部在建立時綁進 closure，不讀腳本的全域變數。
+- **已經跑過 1.6.13 的播放器**：模組上還留著壞掉的包裝。用 `__code__.co_filename` 判斷 `get_engine_path` 是否來自 `vsmlrt.py`，如果不是，就用 `importlib.util.spec_from_file_location` 另外載入一份 vsmlrt.py，取出它的 `get_engine_path` 放回去。vsmlrt 載入時只有定義、沒有副作用，`get_engine_path` 也只依賴參數，所以這份複本和原本的函式等價。**不用 `importlib.reload`**：reload 會重建 `Backend` 類別，而腳本手上是舊的 `Backend.TRT`，`isinstance` 會失敗。
+
+**真的 mpv 驗證**（`--no-config`、同一個 mpv 行程、IPC 送 seek、讀 `estimated-vf-fps`；`vf` 屬性不能用，因為 mpv 停用濾鏡後仍會列出它）：
+
+| 階段 | 輸出 fps |
+|---|---|
+| 1.6.13 腳本，開始播放 | 47.95 |
+| 1.6.13 腳本，seek 兩次後 | **23.97**（NameError ×1，could not init VS ×1）← 重現 |
+| 同一個 mpv 換新腳本，`vf add` 同 label | 23.98（mpv 對還在清單上的同名濾鏡什麼都不做） |
+| 同一個 mpv，`vf remove @fluid` + `vf add`（watcher 的做法） | **47.95**，之後 seek 4 次無新錯誤 |
+| 全新 mpv，一開始就是新腳本，seek 6 次 + 重新套用 | 47.95，錯誤 0 |
+
+新程式的 cache 預先放入仍然有效：VSPipe 冷編 720p，以 1600×900 的 cache 當種子，32.8 s（冷編 40.9 s），執行完 `get_engine_path` 已換回原本的函式。這個種子帶來的效益比 1080p 當種子小（21 s），所以 README 和網站把「大約減半」改成「約兩成到一半」。
+
+**測試**：`tests/test_timing_cache_seed.py` 改寫。假的 vsmlrt 是一個真正的 .py 檔，載入後放進 `sys.modules`；每次「執行」都 exec 進新的 namespace，跑完後 `clear()`。另外用 `co_filename` 為 fluid_rife.vpy、全域變數已清空的函式，模擬被 1.6.13 污染的模組。**拿這組新測試去跑 1.6.13 的程式，13 項全部失敗**（對照組）；新程式 13 項通過。15 個突變全部攔截，包含「不換回」與「不修復污染」。FM 396 → 399，3.10／3.14 通過，CI `37098195513` success。ncnn 與沒有 engine_folder 的輸出，仍和 1.6.12 逐字相同。
+
+**發 v1.6.14**：`66f23c0`，tag 與 release「Fluid Motion v1.6.14」，資產 digest == 本機 SHA256 11c4f42f…（17,805,925 bytes）。打包內的 `vs_script` code object 與原始碼逐欄相同，常數裡有 `_fm_seeded_rife`、沒有 `_fm_unseed`。`--demo` 冒煙無殘留。**v1.6.13 的 release 說明最上方加了警告**，指向 v1.6.14；沒有刪除 v1.6.13。
+
+**擁有者機器上的處理**（擁有者先前交代這件事由我判斷）：`C:\Fluid_Motion\FluidMotion.exe`（執行中的 1.6.13）改名為 `FluidMotion-v1.6.13-broken.exe`，放上 1.6.14；`C:\AX_Player\release\FluidMotion.exe` MATCH；`版本說明.txt` 更新。只結束 FM 的 child（49000），bootloader（52032）自行結束後，從 `C:\Fluid_Motion` 啟動 1.6.14。12:58:48 寫出的 `C:\mpv\shaders\fluid_rife.vpy` 含新程式碼、不含舊程式碼。**擁有者那個 AX（pid 50704，沒有重開）**：透過 IPC 唯讀查詢，來源 30 fps 1920×1080，`estimated-vf-fps` 從 51 升到 **60.0**，vf 有 `fluid`，被污染的模組已自動修好。12:58 之後 AX 日誌沒有任何 VapourSynth 錯誤。
+
+**順帶確認**：AX 的 mpv IPC 管道實際名稱是 `\\.\pipe\C:\Users\…\Temp\mpvSockets\<pid>`，不是 AX 設定的 `fluid-mpv-<pid>`：§7「知道就好」記錄的 mpvSockets 覆寫在這台機器上仍然成立。日誌裡的 `RuntimeError: Signal source has been deleted` 是 08-25 的舊紀錄（`_emit_safely` 修掉的那個），一開始我用時間戳篩選時把沒有時間戳的續行也抓了進來，那不是這次的問題。
