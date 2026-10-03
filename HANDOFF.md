@@ -3134,3 +3134,7 @@ could not init VS / Disabling filter fluid because it has failed.
 **端對端**（原始碼、隔離 LOCALAPPDATA、假的 Telegram）：第一個 AX 不帶參數啟動 → 管道 `AXPlayer-boshe` 出現；第二個 AX 帶網址啟動 → **0.3 秒內以 0 結束**；第一個 AX 的日誌依序是 `handoff target=…` → `play_url` → `loadfile command sent OK`，從轉手伺服器拿了 6 MB；全程只有一個 AX 行程；關閉後管道消失。這次的測試 AX 用 repo 的 mpv-runtime（沒有 VapourSynth），所以擁有者的 FM 沒有對它套補幀，也沒有在擁有者的快取裡編 engine（§9.62 的教訓）。watch_later 只刪了那一筆。
 
 **同一輪，repo 外**（`C:\projects\tg_relay`，不在版本控制裡）：轉手伺服器改成用 Telethon `iter_download(stride=…)` 開 4 條平行下載，依檔案順序交給播放器，每條最多預讀 2 塊；串流一結束（seek 時播放器斷線）就 `aclose()`，把所有平行下載取消。用擁有者的帳號、從同一個 2.8 GB 檔案讀 64 MiB：單線 **3.46 MB/s** → 4 線 **11.5–12.1 MB/s**（約 94 Mbit/s，應該是擁有者網路的上限），seek 後第一個 byte 0.19–0.73 s。影片從頭到尾只經過記憶體，不會寫到硬碟。
+
+**TG 播放器打包成 exe**（`C:\projects\tg_relay` 現在是本機 git repo `b461ab6`，沒有 remote）：`TGPlayer.spec` 用 `UNUSED_QT` 的同一套做法，Qt 只留 Core/Gui/Widgets，31 MB 單檔，部署到 `C:\TG_Player\TGPlayer.exe`，開始功能表有捷徑。冒煙時犯了一個錯：用視窗標題「TG 播放器」找視窗，結果找到並關掉了**擁有者自己開著的那一個**（WM_CLOSE，正常關閉，隨即用 start.bat 重新開回來，截到的圖已刪除）。改成只認自己啟動的那棵行程樹的視窗。**之後做 GUI 冒煙，只能用 PID 找視窗，不能用標題。**
+
+**沒解開的速度差**：第一次打包的 exe 實測 2.0 MB/s（兩次），一分鐘後原始碼版 11.6–12.1 MB/s，重新打包的 exe 11.2–12.6 MB/s。兩個 exe 的 relay.py 和 spec 相同，`cryptg` 也都在 bundle 裡；舊 exe 已被覆蓋，無法重現。2 MB/s 恰好是 Telethon 純 Python AES 的速度，所以 `tg_player.log` 的 start 行現在會記 `crypto=cryptg|libssl|pure-python`，新 exe 記的是 `crypto=cryptg frozen=True`。如果再遇到慢，先看這一行。
