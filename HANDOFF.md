@@ -3150,3 +3150,39 @@ could not init VS / Disabling filter fluid because it has failed.
 **同一輪，TG**（`tg_relay` `e4c72ea`）：關閉視窗會停掉轉手伺服器，正在播的影片會立刻中斷，而且沒有任何提示。現在有串流時會先問（預設「繼續播放」）；`relay.active_streams()` 計算正在服務的請求數。截圖檢查時發現 QMessageBox 是**淺色底、淺色字**，幾乎看不見（它繼承了 QSS 的 INK 文字色，底色卻沒有一起改），改成深色底。
 
 **留給擁有者決定，沒動**：第一次播新解析度時，mpv 在 vf 初始化（編譯 engine，實測約 38 s）期間整個卡住，之後出現 `Audio/Video desynchronisation detected`。FM 在自己的視窗會顯示「編譯中」，但使用者看著的是 AX。可能的方向，例如在套用前暫停播放、編完再繼續，或在 mpv 裡顯示 OSD，都要動 FM 的套用流程；那是 §8 一再提醒的四執行緒並行區，這一輪不碰。
+
+### 9.67 10-03：重建濾鏡時先暫停、好了再繼續（FM v1.6.15）
+
+擁有者選了「編譯前先暫停影片，編完再自動繼續」。**watcher 的並行邏輯一行都沒動**；改的是 `inject.apply()` 在碰 vf 之前多做一步，以及 `zz-fluid-ipc.lua`。
+
+**先量 mpv 的行為**（`--no-config`、腳本開頭 `time.sleep` 模擬編譯）：
+- `vf add` 在 0.04–0.12 s 就回覆；VapourSynth 腳本在**之後**於 core thread 執行，這段期間 IPC 完全不回應（每次查詢都 2 s 逾時）。所以 apply() 等不到編譯結束，要由 mpv 那一側收尾。§9.66 那筆 `apply failed`（濾鏡「沒有掛上」）就是這個形狀。
+- **暫停中**腳本照樣執行；結束後 time-pos 停在原處。
+- 真的聲音輸出（`--ao=wasapi --volume=0`，8 s 模擬編譯）：播放中套用 → **2 次 underrun**；先暫停 → **0 次**。
+- 事件：暫停中套用濾鏡 → mpv 立刻做一次刷新用的 `seek`，腳本跑完才發 `playback-restart`；換新檔（濾鏡掛著）→ `on_preloaded` hook 在腳本**之前**，腳本跑完才發 `playback-restart`。所以 `playback-restart` 就是「管線好了」的訊號，不需要額外的完成標記檔。
+
+**★ 量出一個原本就有的 bug**：暫停中套用濾鏡時，mpv 那次刷新 seek 會被 lua 的 `begin_seek_hold` 當成使用者 seek，**立刻把剛掛上的濾鏡拆掉**。FM 重掛又觸發下一次刷新 seek，結果約每 0.35 s 一次 seek，無止境，濾鏡永遠掛不上去。擁有者暫停時改設定或按 F3 都會碰到。
+
+**★ 實驗被擁有者的 FM 污染過一次**：用 C:\mpv 的 mpv 做實驗時，`mpv_detect` 會認領任何**以 `-<pid>` 結尾**的管道（`pipe_names_pid`），所以就算把 lua 的管道改名成 `fmprobe-mpv-<pid>`，擁有者正在跑的 FM 還是連上了測試 mpv 並套用濾鏡。一開始看到的「T5 暫停中 seek 也有風暴」就是它造成的（日誌裡反覆出現的 `vf add ~~/shaders/fluid_rife.vpy` 是它發的）。最後改成 `fmprobe_<pid>_x` 才真正隔離，之後每次實驗都核對 FM 日誌沒有新增行。那幾次套用都失敗（`~~` 解析不到），engine 資料夾沒有新增檔案。**之後在 C:\mpv 環境做實驗，管道名稱不能以 `-<pid>` 結尾。**
+
+**設計**：
+- `inject.hold_for_rebuild(ipc)`：只有播放器宣告 `user-data/fluid/hold-api == 1`（新 lua 載入時設定）時才動作。播放中 → `pause=yes`，再 `script-message fluid-hold resume`；本來就暫停 → 只送 `fluid-hold keep`（不改暫停狀態，只是讓 lua 忽略那次刷新 seek，也就修掉上面那個 bug）。訊息送不出去時會把剛設的暫停還原，不能讓影片卡在暫停。在 apply() 裡，這一步放在**任何 vf 操作之前**（包括移除舊濾鏡，因為那也是一次 vf 變更）。
+- lua：hold 期間 `begin_seek_hold` 直接 return；`playback-restart` 時 `end_hold()`，只有 `resume` 的 hold 才恢復播放；`on_preloaded` hook 在濾鏡掛著時替換檔加上 hold；使用者在 hold 期間自己按繼續，lua 就放手；15 s 的保險計時器在 lua 自己的執行緒上跑，它呼叫的 set_property 會等編譯結束才執行。
+- **舊腳本的播放器絕不暫停**：mpv 只在啟動時載入腳本，沒重開的播放器沒有 hold-api。對照組實測：舊 lua → FM 沒有暫停（hold-api: None），行為和改版前一樣。
+
+**第二個 bug，在實測換檔時才出現**：換到新解析度的檔案，hold 恢復播放後 **4 ms**，lua 就把剛編好的濾鏡拆掉了（日誌：71.041 s `pause=false` → 71.045 s `vf remove @fluid`），代價是再重建一次。原因是 property 通知是排隊送達的：換檔過程中產生的 `seeking=true`，在 hold 結束之後才送到 observer。擁有者問這件事以前有沒有討論過：git 紀錄 `1f2f62a` 確立了「每次 seek 一律拆掉」（0.14 s 對 0.34 s 才出畫面），`bbce960` 是 seek hold 的由來，**兩者都沒談到換檔**，HANDOFF 也沒有提過。修法是 observer 在動手前，先重讀一次當下的 `seeking`。真正的 seek 仍由 `seek` 事件無條件拆掉濾鏡，那是 `1f2f62a` 的行為，observer 只是備援。修好後隔離實測 T4（播放中 seek）仍然拆掉濾鏡並寫 hold 檔，行為不變。
+
+**實機端對端**（FM 原始碼的 `apply()`、隔離管道的新 lua、**真的 TensorRT 冷編**、真的聲音輸出音量 0、`--config-dir` 指向空的暫存目錄讓 `~~` 有地方解析、engine 資料夾是空的暫存目錄）：
+
+| | 舊 lua（對照） | 新 lua |
+|---|---|---|
+| 960×540 冷編 | 約 44 s，期間照常播放 | 約 36–42 s，期間**暫停**，好了自動繼續 |
+| underrun | **2** | **0** |
+| 之後輸出 | 47.95 fps | 47.95 fps |
+| 同一個 mpv 換到 854×480（新解析度） | — | 由 lua 暫停，約 26–31 s 後自動繼續，**濾鏡保留**，47.95 fps，underrun 0，0 次 `vf remove` |
+
+隔離情境 T3（換檔）、T4（播放中 seek）、T5（暫停中 seek）新舊對照：T4 和 T5 的行為與舊版相同；T3 從「濾鏡被拆掉、要等 FM 重掛」變成「暫停、建好、繼續、濾鏡保留」。
+
+**測試**：`tests/test_rebuild_hold.py` 14 條，包含 Python 端的判斷與順序、lua 契約的文字檢查。突變 10 個全部攔截。lua 的文字檢查只是護欄，真正的證據是上面的實機數據。註解原本寫了「vf add」三個字，觸發了既有的「lua 絕不自己 add vf」文字檢查，所以改的是措辭，那條檢查保留。FM 399 → 413。
+
+**擁有者要做的**：重開 FM，**也要重開 AX**（播放器要重新載入 lua；沒重開的播放器只是不會暫停，不會壞）。
