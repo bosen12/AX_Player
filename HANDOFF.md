@@ -3138,3 +3138,15 @@ could not init VS / Disabling filter fluid because it has failed.
 **TG 播放器打包成 exe**（`C:\projects\tg_relay` 現在是本機 git repo `b461ab6`，沒有 remote）：`TGPlayer.spec` 用 `UNUSED_QT` 的同一套做法，Qt 只留 Core/Gui/Widgets，31 MB 單檔，部署到 `C:\TG_Player\TGPlayer.exe`，開始功能表有捷徑。冒煙時犯了一個錯：用視窗標題「TG 播放器」找視窗，結果找到並關掉了**擁有者自己開著的那一個**（WM_CLOSE，正常關閉，隨即用 start.bat 重新開回來，截到的圖已刪除）。改成只認自己啟動的那棵行程樹的視窗。**之後做 GUI 冒煙，只能用 PID 找視窗，不能用標題。**
 
 **沒解開的速度差**：第一次打包的 exe 實測 2.0 MB/s（兩次），一分鐘後原始碼版 11.6–12.1 MB/s，重新打包的 exe 11.2–12.6 MB/s。兩個 exe 的 relay.py 和 spec 相同，`cryptg` 也都在 bundle 裡；舊 exe 已被覆蓋，無法重現。2 MB/s 恰好是 Telethon 純 Python AES 的速度，所以 `tg_player.log` 的 start 行現在會記 `crypto=cryptg|libssl|pure-python`，新 exe 記的是 `crypto=cryptg frozen=True`。如果再遇到慢，先看這一行。
+
+### 9.66 10-03：檢查有沒有改壞，以及 v1.3.15 的轉交逾時
+
+擁有者要求「檢查還有哪裡要優化，看有沒有改壞」。
+
+**沒有改壞**：AX 223、FM 399、TG 87 全過（AX／FM 用 3.10 與 3.14）。12:00 之後的日誌只有兩類問題：12:45 的 `NameError` 是 1.6.13 的（§9.63，已修好）；`mpvSockets` 那行亂碼錯誤是 §7 早就記錄的第三方腳本問題。13:03 FM 那筆 `apply failed pid=20948` 查過**不是新的 bug**：那是擁有者用 TG 播放器播一個新解析度的影片時（13:02:57 開始），FM 在 13:03:03 檢查時濾鏡還沒掛上，因為 mpv 正在編譯 engine。13:03:41 編好 `66ec52ba.engine`，它的 cache 是 **11.9 MB**，比任何一份冷編的都大，證明 §9.62 的 cache 預先放入在擁有者實際使用時有生效。
+
+**修：轉交沒有逾時**。`multiprocessing.connection.Client` 的握手沒有 timeout。用一個建立了但永遠不 `accept()` 的管道模擬卡死的 AX，舊的 `forward()` **在 8 秒被殺掉時仍在等待**；使用者看到的就是「按了播放，什麼都沒發生」。現在握手放在 daemon thread 裡，`join(3 s)`；逾時就回傳 False，讓這次啟動自己開視窗，並在日誌寫下 `running AX did not answer`（那是「為什麼出現兩個視窗」唯一的線索）。實測 3.0 s 放棄。測試兩條：卡死的管道在 timeout 內回傳 False、日誌有那一行。突變「沒有 timeout」→ 卡住；「逾時不檢查」→ 回傳值剛好一樣（結果清單是空的，所以是等價突變），靠日誌那條斷言才抓得到。AX 223 → 224。
+
+**同一輪，TG**（`tg_relay` `e4c72ea`）：關閉視窗會停掉轉手伺服器，正在播的影片會立刻中斷，而且沒有任何提示。現在有串流時會先問（預設「繼續播放」）；`relay.active_streams()` 計算正在服務的請求數。截圖檢查時發現 QMessageBox 是**淺色底、淺色字**，幾乎看不見（它繼承了 QSS 的 INK 文字色，底色卻沒有一起改），改成深色底。
+
+**留給擁有者決定，沒動**：第一次播新解析度時，mpv 在 vf 初始化（編譯 engine，實測約 38 s）期間整個卡住，之後出現 `Audio/Video desynchronisation detected`。FM 在自己的視窗會顯示「編譯中」，但使用者看著的是 AX。可能的方向，例如在套用前暫停播放、編完再繼續，或在 mpv 裡顯示 OSD，都要動 FM 的套用流程；那是 §8 一再提醒的四執行緒並行區，這一輪不碰。

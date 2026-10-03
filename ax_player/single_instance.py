@@ -56,20 +56,46 @@ def normalise_target(target: str) -> str:
         return target
 
 
-def forward(target: str, name: str | None = None) -> bool:
-    """Hand `target` to a running AX. False when there is none to hand it to."""
-    try:
-        conn = Client(name or pipe_name(), family="AF_PIPE", authkey=_AUTHKEY)
-    except (OSError, EOFError):
+# How long a launch waits for the running AX to take its target. The handshake
+# normally takes milliseconds; an AX that never answers (frozen, suspended)
+# used to keep the new launch waiting forever -- measured: still blocked when
+# killed at 8 s -- which looks exactly like "pressed play, nothing happened".
+FORWARD_TIMEOUT = 3.0
+
+
+def forward(target: str, name: str | None = None, timeout: float = FORWARD_TIMEOUT) -> bool:
+    """Hand `target` to a running AX. False when there is none to hand it to.
+
+    Also False when the running one does not answer within `timeout`: the
+    caller then opens a window of its own rather than appearing to do nothing.
+    The attempt runs on a daemon thread because the handshake has no timeout
+    of its own; if it is still stuck, it is simply abandoned.
+    """
+    payload = normalise_target(target).encode("utf-8")
+    result: list[bool] = []
+
+    def attempt() -> None:
+        try:
+            conn = Client(name or pipe_name(), family="AF_PIPE", authkey=_AUTHKEY)
+        except (OSError, EOFError):
+            result.append(False)
+            return
+        try:
+            _allow_foreground()
+            conn.send_bytes(payload)
+            result.append(True)
+        except (OSError, EOFError):
+            result.append(False)
+        finally:
+            conn.close()
+
+    worker = threading.Thread(target=attempt, name="ax-forward", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        debug_log.log(f"single_instance: running AX did not answer within {timeout:.0f}s, opening a new window")
         return False
-    try:
-        _allow_foreground()
-        conn.send_bytes(normalise_target(target).encode("utf-8"))
-        return True
-    except (OSError, EOFError):
-        return False
-    finally:
-        conn.close()
+    return bool(result and result[0])
 
 
 def _allow_foreground() -> None:

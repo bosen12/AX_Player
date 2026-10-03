@@ -179,3 +179,24 @@ def test_sender_grants_the_foreground(server, name, monkeypatch):
     assert single_instance.forward("", name)
     wait(server.arrived)
     assert granted == [True]
+
+
+def test_a_hung_instance_does_not_hang_the_new_launch(name):
+    # A pipe that exists but is never served: what a frozen AX looks like.
+    # Before the timeout the second launch waited forever for the handshake --
+    # "I pressed play and nothing happened". Now it gives up and the caller
+    # opens a window of its own.
+    from multiprocessing.connection import Listener
+    import time
+
+    hung = Listener(name, family="AF_PIPE", authkey=single_instance._AUTHKEY)  # never accept()s
+    try:
+        t0 = time.monotonic()
+        assert single_instance.forward("http://127.0.0.1:9888/t.me/x/1", name, timeout=0.5) is False
+        assert time.monotonic() - t0 < 3
+        # The log line is the only trace of why a second window appeared.
+        from ax_player import debug_log
+
+        assert "did not answer" in debug_log.path().read_text(encoding="utf-8")
+    finally:
+        hung.close()
