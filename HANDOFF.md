@@ -3113,3 +3113,24 @@ could not init VS / Disabling filter fluid because it has failed.
 - 擁有者資料夾裡那份 480×270 的最新 cache，只會讓第一個新解析度的效益落在「單一 cache」那一檔（約 −27%），之後就開始累積。
 
 **一個沒有重現的崩潰**：exp 那一輪 4K 冷編時，trtexec 回報引擎在 56.2 s 編好、cache 也寫出來了，但 VSPipe 的結束碼是 `3221227274`（0xC000040A）。用同一個引擎再跑兩次 `--info`、再補 200 幀（52.48 fps），結束碼都是 0；1080p 也是 0。只發生在那一次冷編結束時，記下來，沒有動作。如果之後在 mpv 的日誌裡看到 4K 第一次播放時崩潰，這裡是線索。
+
+### 9.65 10-03：單一執行個體（§7 那條「值得單獨開一輪」），發 AX v1.3.14
+
+擁有者要「能完美使用的軟體」。最明顯的缺口是 §9.61 自己列的：TG 播放器每按一次 ▶ 就多開一個 AX。§7「這一輪查過、故意沒做的」第 2 條早就記著同一件事：從檔案總管連開三個檔 = 三個行程、三份 GPU decode context，要 `QLocalServer` 加參數轉送。
+
+**沒用 QLocalServer**：它在 QtNetwork 裡，而 `AXPlayer.spec` 的 `UNUSED_QT` 刻意把 QtNetwork 排除在外（§9.56 的裁剪）。改用標準庫 `multiprocessing.connection` 的 Windows 具名管道，Qt 一個模組都沒加。管道名稱 `\\.\pipe\AXPlayer-<使用者>`，所以不同帳號各自是不同的實例。
+
+`ax_player/single_instance.py`：
+- `forward(target)` 在 **QApplication 與 mpv bootstrap 之前**執行。如果已經有 AX 在跑，就把目標交過去，以 0 結束，第二個行程不會畫出任何東西。
+- 路徑在**送出端**轉成絕對路徑：接收端的工作目錄不同，相對路徑到那邊會指向別處。網址原樣轉送，連 query 都保留，因為那是要播的內容。
+- 只用 `send_bytes`／`recv_bytes`，**絕不用 `send`／`recv`**：`recv` 會 unpickle 任何連上管道的程式送來的東西，等於讓它在 AX 裡執行程式碼。authkey 不是秘密，只是讓誤連的程式講不上話。
+- 送出端呼叫 `AllowSetForegroundWindow(ASFW_ANY)`。Windows 只允許目前在前景的行程把前景交出去，而那個行程是使用者剛啟動的第二個 AX；少了這一步，影片會在別的視窗後面播。
+- 伺服器在 daemon thread 裡 accept，透過 Qt signal（`_Handoff.received`）回到 UI thread。一個壞的 client（authkey 錯、送 pickle）不會讓伺服器停掉。第二個伺服器搶同一個名稱時（`FILE_FLAG_FIRST_PIPE_INSTANCE` 讓它直接失敗）會退讓，退回成獨立視窗，不會讓程式壞掉。
+- `--new-window` 可以不轉送，直接開新視窗。
+- 已知的競態：兩個 AX **同時**冷啟動時，兩邊都找不到伺服器，結果仍然會是兩個視窗（跟改版前一樣，不會更差）。
+
+**測試**：`tests/test_single_instance.py` 14 條，每條測試用隨機的管道名稱，碰不到跑測試的人自己開著的 AX。內容包括真的管道往返、相對路徑轉絕對、連續轉送、送 pickle 的 payload 只會被當成位元組、authkey 錯了之後伺服器仍然可用、`main()` 在建立 QApplication 前就轉送並結束、`--new-window`。突變 10 個全部攔截。一開始漏了「沒有交出前景權限」，補了一條測試後才變紅。AX 209 → 223，3.10／3.14 都通過。
+
+**端對端**（原始碼、隔離 LOCALAPPDATA、假的 Telegram）：第一個 AX 不帶參數啟動 → 管道 `AXPlayer-boshe` 出現；第二個 AX 帶網址啟動 → **0.3 秒內以 0 結束**；第一個 AX 的日誌依序是 `handoff target=…` → `play_url` → `loadfile command sent OK`，從轉手伺服器拿了 6 MB；全程只有一個 AX 行程；關閉後管道消失。這次的測試 AX 用 repo 的 mpv-runtime（沒有 VapourSynth），所以擁有者的 FM 沒有對它套補幀，也沒有在擁有者的快取裡編 engine（§9.62 的教訓）。watch_later 只刪了那一筆。
+
+**同一輪，repo 外**（`C:\projects\tg_relay`，不在版本控制裡）：轉手伺服器改成用 Telethon `iter_download(stride=…)` 開 4 條平行下載，依檔案順序交給播放器，每條最多預讀 2 塊；串流一結束（seek 時播放器斷線）就 `aclose()`，把所有平行下載取消。用擁有者的帳號、從同一個 2.8 GB 檔案讀 64 MiB：單線 **3.46 MB/s** → 4 線 **11.5–12.1 MB/s**（約 94 Mbit/s，應該是擁有者網路的上限），seek 後第一個 byte 0.19–0.73 s。影片從頭到尾只經過記憶體，不會寫到硬碟。

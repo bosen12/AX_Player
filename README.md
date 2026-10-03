@@ -38,6 +38,9 @@ opinion about: **a window shell, and a library for folders of episodes.**
   mpv's own `ytdl_hook` resolves YouTube/Twitch links. A URL also works on
   the command line (`AXPlayer.exe <url>`), so another program can hand AX a
   stream.
+- **One window.** Opening a file, folder or URL while AX is already running
+  hands it to that window instead of starting a second player
+  (`--new-window` opts out).
 - **Always on top**, and a one-click
   [Fluid Motion](https://github.com/bosen12/Fluid_Motion_Player) toggle whose
   icon reflects whether mpv currently has the interpolation filter loaded.
@@ -114,6 +117,7 @@ packaging, project layout and troubleshooting in more depth.
 - **資料夾片庫**：開一個資料夾，自動掃描（可選遞迴含子資料夾）、產生縮圖、依檔名排序——是**自然排序**，第 2 話排在第 10 話前面，不是字典序
 - **拖曳開啟**：影片檔或整個資料夾直接拖進視窗
 - **開啟網址播放**：`setup_mpv.py` 會一併抓 `yt-dlp.exe`，mpv 內建的 `ytdl_hook` 用它來解析 YouTube/Twitch 等串流網站的連結；也可以從命令列帶網址（`AXPlayer.exe <網址>`），讓其他程式把串流交給 AX 播放
+- **只開一個視窗**：AX 已經開著時，再從檔案總管開影片、資料夾或網址，會交給原本那個視窗播放，不會再開第二個播放器（要另開視窗可加 `--new-window`）
 - **播放進度追蹤**：清單上每部影片顯示進度條 + 已看完打勾（實際的「續播」是 mpv 自己的 watch-later 機制在做，這裡只是把進度視覺化）
 - **搜尋 / 多選 / 移除**：側邊欄可以打字篩選，Ctrl+點擊多選後可以「移除選取」（只從播放清單移除，不動硬碟上的檔案）
 - **右鍵選單**：標記已看/未看、在檔案總管中顯示、複製路徑、從清單移除。這個選單裡沒有、以後也不會有「從硬碟刪除」

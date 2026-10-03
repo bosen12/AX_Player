@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ax_player import contact_sheets, debug_log, diagnostics, dnd, resume, settings, ui
+from ax_player import contact_sheets, debug_log, diagnostics, dnd, resume, settings, single_instance, ui
 from ax_player.paths import VIDEO_EXTENSIONS, icon_path, is_video_file, is_video_name
 from ax_player.thumbnails import generate_thumbnail, prune_thumbnail_cache
 
@@ -1352,6 +1352,23 @@ def open_launch_target(window, target: str) -> None:
         window.open_folder(path)
 
 
+def receive_handoff(window, target: str) -> None:
+    """A second launch handed us its file/URL (single_instance.forward)."""
+    debug_log.log(f"single_instance: handoff target={debug_log.safe_url(target) if '://' in target else bool(target)}")
+    if window.isMinimized():
+        window.showNormal()
+    window.raise_()
+    window.activateWindow()
+    if target:
+        open_launch_target(window, target)
+
+
+class _Handoff(QObject):
+    """Carries a handed-off target from the pipe thread to the UI thread."""
+
+    received = Signal(str)
+
+
 def main(argv: list[str] | None = None) -> int:
     # A windowed (console=False) build has nowhere for an uncaught exception
     # to go -- Qt just prints to a stderr nobody can see and the app either
@@ -1366,6 +1383,12 @@ def main(argv: list[str] | None = None) -> int:
     sys.excepthook = _log_uncaught
 
     argv = sys.argv if argv is None else argv
+    targets = [a for a in argv[1:] if not a.startswith("-")]
+    # Before QApplication and the mpv bootstrap: a second launch should be
+    # gone before it has drawn anything. --new-window opts out.
+    if "--new-window" not in argv and single_instance.forward(targets[0] if targets else ""):
+        return 0
+
     app = QApplication(argv)
     app.setApplicationName("AX Player")
     icon_file = icon_path()
@@ -1379,7 +1402,12 @@ def main(argv: list[str] | None = None) -> int:
     window = AXPlayerWindow()
     window.show()
 
-    targets = [a for a in argv[1:] if not a.startswith("-")]
+    handoff = _Handoff()
+    handoff.received.connect(lambda target: receive_handoff(window, target))
+    server = None if "--new-window" in argv else single_instance.serve(handoff.received.emit)
+    if server is not None:
+        app.aboutToQuit.connect(server.close)
+
     if targets:
         open_launch_target(window, targets[0])
     else:
