@@ -3233,3 +3233,29 @@ could not init VS / Disabling filter fluid because it has failed.
 **測試**：`hold_for_rebuild(pause_playing=False)` 在播放中／暫停中的兩條、`apply` 有把參數傳下去，以及兩條跑真 `tick()` 的 watcher 測試：第一次 True、seek 後同設定 False、seek 期間改設定 True；這個豁免在用掉之後就失效。6 個突變全部攔截。一開始漏了兩個（「apply 沒有往下傳」「成功後沒清」），補了測試才變紅。FM 416 → 421。測試用的假 `apply` 原本把參數寫死，改成接受 `**_kw`，和真的 `apply()` 一致。
 
 擁有者的 `config.json` 在 17:44:09 改成 `3x / 426`：那時擁有者的 FM 1.6.16 開著，測試則是 17:52 之後才跑，而且測試用的設定是隔離的（`2x`），所以這不是測試改的。
+
+### 9.70 10-14：連續快轉時自己暫停約 1 秒（FM v1.6.18）
+
+**擁有者**：「以前快轉影片都正常，現在很常會突然自己暫停又恢復，大概 1 秒」。用的是 1.6.17。
+
+**原因**：§9.69 的豁免只在 watcher **親眼看到** seek hold（`_held_off`）時才記下 `_seek_dropped`。但濾鏡是 lua 在 `seek` 事件裡自己拔的，hold 檔在 `playback-restart` 後 0.15 s 就清掉：沒有 VapourSynth 時從拔掉到清掉只有約 0.2 s，比 tick 週期（0.3 s＋tick 本身）短。tick 落在外面時，watcher 只看到「濾鏡不見了、key 沒變」（`stale=False, missing=True`），`_seek_dropped` 是空的 → `pause_for_rebuild=True` → 暫停、重建、繼續。1.6.14 以前重新套用從不暫停，所以漏看無害；1.6.15 起才看得見。
+
+**★ 單次 seek 量不出來，§9.69 的「1/5 次 pause=True」其實就是它**：第一版假設是「hold 窗太短、tick 常漏看」，但 1.6.17 單次 seek ×25 全部 0 暫停。mpv 日誌顯示原因：濾鏡掛著時，seek 會先讓 mpv 在 core thread 重新初始化 VS（約 0.16 s），lua 的 `seek` handler 和 watcher 的 IPC 都被它擋住，等於把 tick 對齊到 hold 窗裡。只有在**補幀剛掛回去不久又 seek**（點方向鍵快轉的正常用法）時，tick 剛跑完一輪、正在睡，才會漏。日誌實例：20.511 FM 掛回（不暫停）→ 20.676 seek → 20.806 lua 拔掉 → 21.040 FM 以暫停模式重新套用。§9.69 寫「第一輪 1/5 次取到 `pause=True`，重跑 0/5」，當時歸為雜訊，那就是這個 bug。
+
+**修**（FM `6ab13df`）：`_apply_to` 成功時記下這次套用的檔案（`_applied_media[pid]`，snapshot 的 `media`）。新的 `Engine._put_back()`：`_seek_dropped == key`（看到的 seek），**或**「`applied == key`、目前檔名非空、且和套用時相同」（沒看到的 seek）→ 不暫停。換檔（新解析度可能要編 engine）、換設定、讀不到檔名，仍然暫停。暫停中照樣送 `keep`（§9.67 的風暴保護不受影響）。lua 沒動，播放器不必重開。
+
+**實機**（完整 FM 含 watcher、真 mpv `--config-dir=C:\mpv`、真 TensorRT、擁有者的設定 3x／425／nvidia、隔離 APPDATA、聲音輸出音量 0、960×540 與 854×480 測試片；基準用 `git worktree` 取出 1.6.17）：
+
+| | 1.6.17 | 1.6.18 |
+|---|---|---|
+| 單次播放中 seek ×20＋第二個檔 ×5 | 0 暫停 | 0 暫停 |
+| 連按／點按／補幀剛回來就 seek／來回，共 112 次 seek | **暫停 8 次**（`fluid-hold resume` 8 次） | **0 次** |
+| 暫停中 seek | 維持暫停、濾鏡保留 | 同左 |
+| 換到新解析度、之後 10 s 穩定 | 正常 | 正常 |
+| underrun／不同步 | 0／0 | 0／0 |
+
+**測試**：`test_a_seek_the_watcher_never_saw_still_puts_the_filter_back_without_a_pause` 跑真 `tick()`：沒看到 hold 的 seek → False；換檔、seek 期間換設定、未命名檔（連續兩次）→ True。6 個突變全部攔截；一開始「拿掉檔名非空檢查」「拿掉 key 比對」兩個沒攔到，補了對應情境才變紅。FM 421 → 422。
+
+**順帶記一個環境陷阱**：實機實驗開著真 mpv 時跑 FM 全套測試，`test_a_pipe_naming_a_dead_pid_does_not_invent_a_player` 會因為看到那個 mpv.exe 而失敗，與程式碼無關；突變測試要只跑相關檔案，或等 mpv 關掉。
+
+**教訓**：§9.68 說要「觀察 engine 已存在的穩定狀態一段時間」，這次再加一條：**seek 要量真人的節奏**（連續、間隔 0.3–1.3 s、剛恢復就再 seek），不只是彼此相隔數秒的單次 seek。
